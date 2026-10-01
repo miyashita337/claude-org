@@ -1,5 +1,5 @@
 'use strict';
-// Port of agent-base tests/test_claude_org_proxy.sh cases P8-P10:
+// Port of the original bash proxy test suite (test_claude_org_proxy.sh) cases P8-P10:
 // the `claude-org proxy` subcommand launches a session-scoped proxy, points
 // claude at it, and tears the proxy down when claude exits.
 const test = require('node:test');

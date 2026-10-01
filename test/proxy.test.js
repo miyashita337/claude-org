@@ -1,5 +1,5 @@
 'use strict';
-// Port of agent-base tests/test_claude_org_proxy.sh cases P1-P7 to node:test.
+// Port of the original bash proxy test suite (test_claude_org_proxy.sh) cases P1-P7 to node:test.
 // In-process proxy + in-process stub upstream (no real API calls).
 const test = require('node:test');
 const assert = require('node:assert');
