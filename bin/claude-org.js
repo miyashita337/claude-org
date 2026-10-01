@@ -7,6 +7,8 @@ const { probe } = require('../lib/probe');
 const { pick } = require('../lib/pick');
 const { launch } = require('../lib/launch');
 const { statusAll } = require('../lib/status');
+const { watch } = require('../lib/watch');
+const { proxyLaunch } = require('../lib/proxy');
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
@@ -33,10 +35,9 @@ async function main() {
     case 'auto':
       return launch(await pick(), rest);
     case 'watch':
+      return watch();
     case 'proxy':
-      // Wired up in the proxy/watch port (S3).
-      console.error(`claude-org: ${cmd} is not implemented yet`);
-      return 2;
+      return proxyLaunch(rest);
     default:
       // <name> launches claude with that org's token.
       return launch(cmd, rest);
