@@ -1,5 +1,5 @@
 'use strict';
-// Port of agent-base tests/test_claude_org.sh cases T1-T14 to node:test.
+// Port of the original bash test suite (test_claude_org.sh) cases T1-T14 to node:test.
 // Mapping is documented in the PR body (AC-2).
 const test = require('node:test');
 const assert = require('node:assert');
