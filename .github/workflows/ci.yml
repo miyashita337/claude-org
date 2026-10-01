@@ -23,4 +23,5 @@ jobs:
         shell: bash
         run: |
           npm install -g .
-          claude-org --help | tee /dev/stderr | grep -q "claude-org auto"
+          claude-org --help
+          claude-org --help | grep -q "claude-org auto"
