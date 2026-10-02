@@ -27,6 +27,8 @@ console.log('token=' + (process.env.CLAUDE_CODE_OAUTH_TOKEN || '<unset>'));
 console.log('base=' + (process.env.ANTHROPIC_BASE_URL || '<unset>'));
 console.log('auth=' + (process.env.ANTHROPIC_AUTH_TOKEN || '<unset>'));
 console.log('proxyflag=' + (process.env.CLAUDE_ORG_PROXY || '<unset>'));
+console.log('ttl=' + (process.env.CLAUDE_CODE_PROMPT_CACHE_TTL || '<unset>'));
+console.log('toolsearch=' + (process.env.ENABLE_TOOL_SEARCH || '<unset>'));
 const base = process.env.ANTHROPIC_BASE_URL;
 if (base) {
   fetch(base + '/v1/models', { method: 'POST', body: '' })
@@ -48,13 +50,21 @@ function makeClaudeStub(dir) {
   return dir;
 }
 
+// Vars that must not leak from the parent environment into the child
+// (a real settings.json env block could set these and fake a PASS).
+const STRIP_ENV = ['CLAUDE_CODE_PROMPT_CACHE_TTL', 'ENABLE_TOOL_SEARCH'];
+function cleanEnv(extra = {}) {
+  const e = { ...process.env };
+  for (const k of Object.keys(e)) if (k.startsWith('CLAUDE_ORG_')) delete e[k];
+  for (const k of STRIP_ENV) delete e[k];
+  return { ...e, ...extra };
+}
+
 // Run the real bin as a subprocess. CLAUDE_ORG_* inherited from the parent is
 // stripped first so tests are deterministic.
 function runBin(args, env = {}, opts = {}) {
-  const e = { ...process.env };
-  for (const k of Object.keys(e)) if (k.startsWith('CLAUDE_ORG_')) delete e[k];
   return spawnSync(process.execPath, [BIN, ...args], {
-    env: { ...e, ...env },
+    env: cleanEnv(env),
     encoding: 'utf8',
     timeout: opts.timeout || 60000,
   });
@@ -63,10 +73,8 @@ function runBin(args, env = {}, opts = {}) {
 // Async variant: use when the test's own event loop must stay alive
 // (e.g. the test hosts a stub server the child talks to).
 function runBinAsync(args, env = {}) {
-  const e = { ...process.env };
-  for (const k of Object.keys(e)) if (k.startsWith('CLAUDE_ORG_')) delete e[k];
   return new Promise(resolve => {
-    const child = spawn(process.execPath, [BIN, ...args], { env: { ...e, ...env } });
+    const child = spawn(process.execPath, [BIN, ...args], { env: cleanEnv(env) });
     let stdout = '', stderr = '';
     child.stdout.on('data', c => { stdout += c; });
     child.stderr.on('data', c => { stderr += c; });

@@ -72,6 +72,15 @@ One log line per request (`via <org> -> <status>`) goes to a temp file printed a
 - claude.ai connector MCPs (Gmail / Drive / Calendar / Notion / Slack …) and Remote Control are **unavailable**: `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat the session as external-token auth, so `mcp__claude_ai_*` tools do not appear. Local/plugin MCPs work. Open connectors in a plain `claude --resume` session — history is shared.
 - Each proxy serves one session and dies when `claude` exits.
 
+### Prompt cache & tool search
+
+A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat the session as API-key auth, which changes two defaults:
+
+- **Prompt cache TTL drops to 5 minutes** (subscription-direct sessions get 1 hour). The 1-hour TTL is requested via the `anthropic-beta` header, which the proxy forwards unchanged.
+- **MCP tool search** (deferred tool-definition loading) is **disabled**.
+
+`claude-org proxy` restores the subscription-equivalent behavior by launching `claude` with `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` and `ENABLE_TOOL_SEARCH=true`. If you have set either variable yourself, your value wins.
+
 | Entry point | Mid-session switch | Connector MCPs | Best for |
 |---|---|---|---|
 | `claude` | no (default org) | yes | connector work |
