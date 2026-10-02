@@ -66,6 +66,7 @@ test.before(async () => {
         'anthropic-ratelimit-unified-5h-utilization': '0.25',
         'x-seen-api-key': seenKey,
         'x-served-token': tok,
+        'x-seen-beta': req.headers['anthropic-beta'] || '<none>',
       });
       res.end('{"type":"message","content":[{"type":"text","text":"OK"}]}');
     });
@@ -170,4 +171,14 @@ test('P7: SSE stream passes through', async t => {
   const body = await r.text();
   assert.match(body, /STREAMED/);
   assert.match(body, /message_stop/);
+});
+
+// P12: the anthropic-beta header (which requests the 1h cache TTL) is
+// forwarded to upstream unchanged
+test('P12: anthropic-beta header is forwarded unchanged', async t => {
+  const p = await startProxy(t, { order: ['a'] });
+  const r = await post(p.port, '/v1/messages', {
+    'anthropic-beta': 'extended-cache-ttl-2025-04-11,oauth-2025-04-20',
+  });
+  assert.strictEqual(r.headers.get('x-seen-beta'), 'extended-cache-ttl-2025-04-11,oauth-2025-04-20');
 });
