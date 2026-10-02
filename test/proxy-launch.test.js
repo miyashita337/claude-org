@@ -39,6 +39,11 @@ test('P8: proxy subcommand wires env, serves, and cleans up', async () => {
     assert.match(r.stdout, /^auth=claude-org-proxy$/m);
     assert.match(r.stdout, /^proxyflag=1$/m);
     assert.match(r.stdout, /^proxy_alive=200$/m, `proxy not reachable from claude: ${r.stdout}`);
+    // P8.8/P8.9: proxy defaults restore subscription-equivalent cache TTL and
+    // tool search (the harness env is stripped by the test helper, so these
+    // values can only come from claude-org itself)
+    assert.match(r.stdout, /^ttl=1h$/m, `CLAUDE_CODE_PROMPT_CACHE_TTL default missing: ${r.stdout}`);
+    assert.match(r.stdout, /^toolsearch=true$/m, `ENABLE_TOOL_SEARCH default missing: ${r.stdout}`);
     assert.match(r.stderr, /^-> proxy 127\.0\.0\.1:/m);
     // After exit, the proxy must be gone.
     await new Promise(r2 => setTimeout(r2, 500));
@@ -62,6 +67,27 @@ test('P9: proxy requires 2+ org tokens', async () => {
   assert.strictEqual(r.status, 1);
   assert.strictEqual(r.stdout, '');
   assert.match(r.stderr, /2 つ以上/);
+});
+
+// P11: user-set CLAUDE_CODE_PROMPT_CACHE_TTL / ENABLE_TOOL_SEARCH are not
+// overwritten by the proxy defaults
+test('P11: user-set cache TTL / tool search env are preserved', async () => {
+  const upstream = await stubUpstream();
+  const stub = makeClaudeStub(path.join(tmpdir(), 'bin'));
+  const dir = makeTokenDir(TOKEN_SET);
+  try {
+    const r = await runBinAsync(['proxy'], {
+      PATH: stub + path.delimiter + process.env.PATH,
+      CLAUDE_ORG_TOKEN_DIR: dir,
+      CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
+      CLAUDE_CODE_PROMPT_CACHE_TTL: '5m',
+      ENABLE_TOOL_SEARCH: 'false',
+    });
+    assert.match(r.stdout, /^ttl=5m$/m, `user env overwritten: ${r.stdout}`);
+    assert.match(r.stdout, /^toolsearch=false$/m, `user env overwritten: ${r.stdout}`);
+  } finally {
+    upstream.close();
+  }
 });
 
 // P10 (supersedes "proxy body missing -> exit 1" of the bash version, which
