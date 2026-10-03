@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## Unreleased
+
+- Docs: clarify Setup (org picker, token is printed and saved manually, repeat once per org); example labels are `work` / `personal` and explicitly arbitrary
+
+## 0.1.0 — 2026-10-03
 
 Initial public release.
 
