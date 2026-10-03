@@ -25,3 +25,5 @@ jobs:
           npm install -g .
           claude-org --help
           claude-org --help | grep -q "claude-org auto"
+          ccorg --help
+          ccorg --help | grep -q "claude-org auto"
