@@ -1,6 +1,6 @@
 {
   "name": "claude-org",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Switch Claude Code between multiple Anthropic organizations, with automatic failover on the 5-hour rate limit",
   "license": "MIT",
   "type": "commonjs",
