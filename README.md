@@ -2,7 +2,7 @@
 
 Launch [Claude Code](https://code.claude.com) under a specific Anthropic **organization** — and keep running when the 5-hour usage limit hits, by failing over to another org you belong to.
 
-When one account has multiple Claude organizations (e.g. a personal Pro/Max org and a company Team org), hitting the usage limit stalls your session. `claude-org` switches the credential `claude` starts with, and — in `proxy` mode — swaps it **mid-session** the moment the limit hits, so a long-running task never stops.
+When one account has multiple Claude organizations (e.g. a personal org and your company's org, or several personal orgs), hitting the usage limit stalls your session. `claude-org` switches the credential `claude` starts with, and — in `proxy` mode — swaps it **mid-session** the moment the limit hits, so a long-running task never stops.
 
 Requires Node.js 18+. Zero runtime dependencies. Works on Windows, macOS, and Linux.
 
@@ -14,29 +14,39 @@ npm install -g claude-org
 
 ## Setup
 
-1. Generate a long-lived token per org (valid ~1 year):
+Each org you want to switch between needs its own long-lived token, saved under a label you choose. The plain `claude` login (no token file) is called the **default org** and needs no setup.
+
+Repeat steps 1–2 **once per org**:
+
+1. Generate a token for one org (valid ~1 year):
 
    ```sh
    claude setup-token
    ```
 
-   In the browser, pick the org you want the token for, approve, and paste the auth code back into the terminal.
+   A browser opens. If your account belongs to several orgs, an **org picker** appears — choose the org this token is for. Approve, paste the auth code back into the terminal, and `claude setup-token` **prints the token to stdout**. It does not save it anywhere; you save it in the next step.
 
-2. Save each token (no trailing newline) as `~/.claude/org-tokens/<name>.token` (`<name>` is your label, e.g. `team`):
+2. Save that token (no trailing newline) as `~/.claude/org-tokens/<name>.token`. `<name>` is just a label you pick — it does not need to match the org's plan or display name. `work` and `personal` are common; `client-a`, `personal2`, etc. are equally fine.
 
    ```sh
    # bash / macOS / Linux
    mkdir -p ~/.claude/org-tokens
-   printf '%s' '<token>' > ~/.claude/org-tokens/team.token
+   printf '%s' '<token>' > ~/.claude/org-tokens/work.token
    ```
 
    ```powershell
    # PowerShell
    New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\org-tokens" | Out-Null
-   Set-Content -NoNewline "$env:USERPROFILE\.claude\org-tokens\team.token" "<token>"
+   Set-Content -NoNewline "$env:USERPROFILE\.claude\org-tokens\work.token" "<token>"
    ```
 
-   The plain `claude` login (no env) is called the **default org** and needs no token file. Note the token may visually wrap to two lines in the terminal — join it into one.
+   The token may visually wrap onto two lines in the terminal — join it into one.
+
+3. Check that each label points at the org you intended:
+
+   ```sh
+   claude-org status
+   ```
 
 ## Commands
 
@@ -44,7 +54,7 @@ npm install -g claude-org
 |---|---|
 | `claude-org proxy [claude args...]` | Launch via a local proxy: a **running** session fails over to another org the moment the 5h limit hits. Needs 2+ org tokens (incl. one for the default side). |
 | `claude-org auto [claude args...]` | Launch on the preferred org if usable, else on the default org. Decided once at launch. |
-| `claude-org <name> [claude args...]` | Launch with that org's token, e.g. `claude-org team --resume`. |
+| `claude-org <name> [claude args...]` | Launch with that org's token, e.g. `claude-org work --resume`. |
 | `claude-org probe [<name>]` | Print the org's 5h window state on one line (`status= 5h_util= 5h_reset= 5h_reset_local=`). Exit 0 when `allowed`. |
 | `claude-org watch` | Poll the preferred org until its window recovers, then notify (terminal + optional `CLAUDE_ORG_NOTIFY_CMD`). |
 | `claude-org status` | `claude auth status` for every saved token + the default login. |
