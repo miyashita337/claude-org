@@ -12,6 +12,8 @@ Requires Node.js 18+. Zero runtime dependencies. Works on Windows, macOS, and Li
 npm install -g claude-org
 ```
 
+This installs two commands that behave identically: `claude-org` and the shorter alias `ccorg`. Examples below use `claude-org`; substitute `ccorg` anywhere.
+
 ## Setup
 
 Each org you want to switch between needs its own long-lived token, saved under a label you choose. The plain `claude` login (no token file) is called the **default org** and needs no setup.
