@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-10-03
 
 - Add `ccorg` as a short command alias for `claude-org` (same binary)
 - Docs: clarify Setup (org picker, token is printed and saved manually, repeat once per org); example labels are `work` / `personal` and explicitly arbitrary
