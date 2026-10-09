@@ -62,10 +62,18 @@ test.before(async () => {
       // - tok-nogate-bare: the model needs usage credits; no window headers,
       //   brotli-compressed body.
       // - tok-transient: a per-minute limit with retry-after 0.
+      // - tok-transient-date: the same with an HTTP-date retry-after in the past.
+      // - tok-huge: a 429 body larger than the proxy's read cap.
+      // Any model whose name starts with "gated" is refused, unless it ends
+      // with "-ok" (to tell apart long names that share an 80-char prefix).
       let model = '';
       try { model = JSON.parse(body).model; } catch { /* non-JSON body: no model */ }
-      const gated = ['tok-nogate-allowed', 'tok-nogate-bare', 'tok-transient'];
-      if (model === 'gated' && gated.includes(tok)) {
+      const gated = ['tok-nogate-allowed', 'tok-nogate-bare', 'tok-transient', 'tok-transient-date', 'tok-huge'];
+      if (typeof model === 'string' && model.startsWith('gated') && !model.endsWith('-ok') && gated.includes(tok)) {
+        if (tok === 'tok-huge') {
+          res.writeHead(429, { 'content-type': 'application/json' });
+          return res.end(Buffer.alloc(2 * 1024 * 1024, 'x'));
+        }
         const h = { 'content-type': 'application/json' };
         let out = Buffer.from(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: `gated model refused for ${tok}` } }));
         if (tok === 'tok-nogate-allowed') {
@@ -82,7 +90,7 @@ test.before(async () => {
           h['content-encoding'] = 'br';
         } else {
           h['anthropic-ratelimit-unified-5h-status'] = 'allowed';
-          h['retry-after'] = '0';
+          h['retry-after'] = tok === 'tok-transient-date' ? new Date(Date.now() - 1000).toUTCString() : '0';
         }
         res.writeHead(429, h);
         return res.end(out);
@@ -312,4 +320,34 @@ test('P19: compressed 429 body is decoded for the log', async t => {
   await post(p.port, '/v1/messages', {}, bodyFor('gated'));
   assert.ok(p.logs.some(l => l.includes('x rejected model gated') && l.includes('rate_limit_error: gated model refused for tok-nogate-bare')),
     `log missing: ${p.logs.join('')}`);
+});
+
+// P20: two model names that share an 80-char prefix have separate quarantines
+test('P20: long model names with the same prefix do not share a quarantine', async t => {
+  const dir = makeTokenDir({ x: 'tok-nogate-bare', a: 'tok-a' });
+  const p = await startProxy(t, { order: ['x', 'a'], dir });
+  const long = `gated${'x'.repeat(100)}`;
+  await post(p.port, '/v1/messages', {}, bodyFor(long));
+  const r = await post(p.port, '/v1/messages', {}, bodyFor(`${long}-ok`));
+  assert.strictEqual(r.headers.get('x-claude-org'), 'x', 'the other model was moved off the org');
+});
+
+// P21: an HTTP-date retry-after in the past lets the org serve the model again
+test('P21: HTTP-date retry-after is honoured', async t => {
+  const dir = makeTokenDir({ x: 'tok-transient-date', a: 'tok-a' });
+  const p = await startProxy(t, { order: ['x', 'a'], dir });
+  await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  const before = hits['tok-transient-date'] || 0;
+  await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  assert.strictEqual(hits['tok-transient-date'] || 0, before + 1, 'org was skipped despite a past retry-after date');
+});
+
+// P22: a 429 body over the read cap is dropped and the next org serves
+test('P22: oversized 429 body is not buffered and the next org serves', async t => {
+  const dir = makeTokenDir({ x: 'tok-huge', a: 'tok-a' });
+  const p = await startProxy(t, { order: ['x', 'a'], dir });
+  const r = await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.headers.get('x-claude-org'), 'a');
+  assert.ok(p.logs.some(l => l.includes('429 body larger than')), `log missing: ${p.logs.join('')}`);
 });
