@@ -7,19 +7,19 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { tmpdir, makeTokenDir } = require('./helpers');
+const zlib = require('zlib');
 const { createProxy } = require('../lib/proxy');
 
-const UPSTREAM_CODE = {
-  // tok-limited -> 429 + rejected; others -> 200 + allowed. Reports whether
-  // x-api-key reached it (x-seen-api-key) and which token served (x-served-token).
-  hits: {},
-};
-
+// Stub upstream: tok-limited -> 429 + 5h rejected; tok-a / tok-b -> 200 +
+// allowed. Reports whether x-api-key reached it (x-seen-api-key) and which
+// token served (x-served-token). `hits` counts requests per token.
 let upPort;
 let upServer;
 const hits = {};
 
-const BODY = JSON.stringify({ model: 'm', max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] });
+const bodyFor = model => JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] });
+const BODY = bodyFor('m');
+const inAnHour = () => String(Math.floor(Date.now() / 1000) + 3600);
 
 test.before(async () => {
   upServer = http.createServer((req, res) => {
@@ -42,6 +42,50 @@ test.before(async () => {
           'x-seen-api-key': seenKey,
         });
         return res.end('{"type":"error","error":{"type":"rate_limit_error"}}');
+      }
+      // tok-7d: the 7d window (all models) is used up while 5h is allowed.
+      if (tok === 'tok-7d') {
+        res.writeHead(429, {
+          'content-type': 'application/json',
+          'anthropic-ratelimit-unified-5h-status': 'allowed',
+          'anthropic-ratelimit-unified-7d-status': 'rejected',
+          'anthropic-ratelimit-unified-7d-reset': inAnHour(),
+          'anthropic-ratelimit-unified-status': 'rejected',
+          'anthropic-ratelimit-unified-representative-claim': 'seven_day',
+        });
+        return res.end('{"type":"error","error":{"type":"rate_limit_error","message":"weekly"}}');
+      }
+      // Model-specific refusals of the model "gated", with the headers and body
+      // shapes the real API returned on 2026-10-10 (other models succeed):
+      // - tok-nogate-allowed: a used-up per-model weekly allowance. 5h and 7d
+      //   are allowed but the overall unified-status reads "rejected".
+      // - tok-nogate-bare: the model needs usage credits; no window headers,
+      //   brotli-compressed body.
+      // - tok-transient: a per-minute limit with retry-after 0.
+      let model = '';
+      try { model = JSON.parse(body).model; } catch { /* non-JSON body: no model */ }
+      const gated = ['tok-nogate-allowed', 'tok-nogate-bare', 'tok-transient'];
+      if (model === 'gated' && gated.includes(tok)) {
+        const h = { 'content-type': 'application/json' };
+        let out = Buffer.from(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: `gated model refused for ${tok}` } }));
+        if (tok === 'tok-nogate-allowed') {
+          Object.assign(h, {
+            'anthropic-ratelimit-unified-5h-status': 'allowed',
+            'anthropic-ratelimit-unified-5h-utilization': '0.05',
+            'anthropic-ratelimit-unified-7d-status': 'allowed_warning',
+            'anthropic-ratelimit-unified-status': 'rejected',
+            'anthropic-ratelimit-unified-representative-claim': 'seven_day_overage_included',
+            'retry-after': '132348',
+          });
+        } else if (tok === 'tok-nogate-bare') {
+          out = zlib.brotliCompressSync(out);
+          h['content-encoding'] = 'br';
+        } else {
+          h['anthropic-ratelimit-unified-5h-status'] = 'allowed';
+          h['retry-after'] = '0';
+        }
+        res.writeHead(429, h);
+        return res.end(out);
       }
       if (!tok.startsWith('tok-')) {
         res.writeHead(401, { 'x-seen-api-key': seenKey });
@@ -181,4 +225,91 @@ test('P12: anthropic-beta header is forwarded unchanged', async t => {
     'anthropic-beta': 'extended-cache-ttl-2025-04-11,oauth-2025-04-20',
   });
   assert.strictEqual(r.headers.get('x-seen-beta'), 'extended-cache-ttl-2025-04-11,oauth-2025-04-20');
+});
+
+// P13: a model-specific 429 (5h still allowed) fails over to the next org, the
+// log names the org, the model and the reason, and the org stays in use for
+// other models (Issue #8)
+test('P13: model-specific 429 fails over without quarantining the org', async t => {
+  const dir = makeTokenDir({ x: 'tok-nogate-allowed', a: 'tok-a' });
+  const p = await startProxy(t, { order: ['x', 'a'], dir });
+  let r = await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.headers.get('x-claude-org'), 'a');
+  const line = p.logs.find(l => l.includes('x rejected model gated'));
+  assert.ok(line, `log missing: ${p.logs.join('')}`);
+  assert.match(line, /5h=allowed/);
+  assert.match(line, /rate_limit_error: gated model refused for tok-nogate-allowed/);
+  assert.ok(!p.logs.some(l => l.includes('x is rate-limited')), 'org was logged as org-wide limited');
+  r = await post(p.port, '/v1/messages', {}, bodyFor('other'));
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.headers.get('x-claude-org'), 'x', 'other model was moved off the org');
+});
+
+// P14: the same model skips the org that refused it on the next request
+test('P14: refused model skips that org on later requests', async t => {
+  const dir = makeTokenDir({ x: 'tok-nogate-bare', a: 'tok-a' });
+  const p = await startProxy(t, { order: ['x', 'a'], dir });
+  await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  const before = hits['tok-nogate-bare'] || 0;
+  const r = await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  assert.strictEqual(r.headers.get('x-claude-org'), 'a');
+  assert.strictEqual(hits['tok-nogate-bare'] || 0, before, 'org was asked again for the refused model');
+});
+
+// P15: every org refuses the model -> the last 429 body is returned as is and
+// the log says to switch the model
+test('P15: all orgs refusing a model returns the 429 and says to switch model', async t => {
+  const dir = makeTokenDir({ x: 'tok-nogate-allowed', y: 'tok-nogate-bare' });
+  const p = await startProxy(t, { order: ['x', 'y'], dir });
+  const r = await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  assert.strictEqual(r.status, 429);
+  assert.strictEqual(r.headers.get('x-claude-org'), 'y');
+  const body = await r.json();
+  assert.strictEqual(body.error.message, 'gated model refused for tok-nogate-bare');
+  assert.ok(p.logs.some(l => l.includes('all orgs rejected model gated') && l.includes('switch the model')),
+    `log missing: ${p.logs.join('')}`);
+});
+
+// P16: a 5h "rejected" 429 still quarantines the whole org, for every model
+test('P16: 5h-rejected org is avoided for other models too', async t => {
+  const p = await startProxy(t, { order: ['limited', 'a'] });
+  await post(p.port, '/v1/messages', {}, bodyFor('m1'));
+  const before = hits['tok-limited'] || 0;
+  const r = await post(p.port, '/v1/messages', {}, bodyFor('m2'));
+  assert.strictEqual(r.headers.get('x-claude-org'), 'a');
+  assert.strictEqual(hits['tok-limited'] || 0, before, 'org-wide limited org was asked again');
+});
+
+// P17: a 7d "rejected" 429 is org-wide even though 5h is still allowed
+test('P17: 7d-rejected org is avoided for other models too', async t => {
+  const dir = makeTokenDir({ w: 'tok-7d', a: 'tok-a' });
+  const p = await startProxy(t, { order: ['w', 'a'], dir });
+  let r = await post(p.port, '/v1/messages', {}, bodyFor('m1'));
+  assert.strictEqual(r.headers.get('x-claude-org'), 'a');
+  assert.ok(p.logs.some(l => l.includes('w is rate-limited (HTTP 429, 5h=allowed, claim=seven_day)')),
+    `log missing: ${p.logs.join('')}`);
+  const before = hits['tok-7d'] || 0;
+  r = await post(p.port, '/v1/messages', {}, bodyFor('m2'));
+  assert.strictEqual(r.headers.get('x-claude-org'), 'a');
+  assert.strictEqual(hits['tok-7d'] || 0, before, '7d-limited org was asked again');
+});
+
+// P18: a model refusal with a short retry-after does not keep the org out
+test('P18: short retry-after lets the org serve the model again right away', async t => {
+  const dir = makeTokenDir({ x: 'tok-transient', a: 'tok-a' });
+  const p = await startProxy(t, { order: ['x', 'a'], dir });
+  await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  const before = hits['tok-transient'] || 0;
+  await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  assert.strictEqual(hits['tok-transient'] || 0, before + 1, 'org was skipped despite retry-after 0');
+});
+
+// P19: a brotli-compressed 429 body is decoded for the log line
+test('P19: compressed 429 body is decoded for the log', async t => {
+  const dir = makeTokenDir({ x: 'tok-nogate-bare', a: 'tok-a' });
+  const p = await startProxy(t, { order: ['x', 'a'], dir });
+  await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  assert.ok(p.logs.some(l => l.includes('x rejected model gated') && l.includes('rate_limit_error: gated model refused for tok-nogate-bare')),
+    `log missing: ${p.logs.join('')}`);
 });
