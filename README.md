@@ -71,7 +71,7 @@ claude-org probe work --model claude-fable-5-1
 # status=allowed 5h_util=0.34 ... model=claude-fable-5-1 model_status=unavailable model_error=rate_limit_error
 ```
 
-`model_status` is `available` (2xx), `unavailable` (refused while the 5h/7d windows are not rejected; exit 1) or `unknown` (no response, bad token, server error, or a rejected window). Setting `CLAUDE_ORG_PROBE_MODEL` applies the same check to `probe`, `status` and `auto`; `auto` then launches on the default org when the preferred org refuses that model.
+`model_status` is `available` (2xx), `unavailable` (refused while the 5h/7d windows are not rejected; exit 1) or `unknown` (no response, bad token or permission, timeout, server error, or a rejected window; the exit code then follows `status` alone). Setting `CLAUDE_ORG_PROBE_MODEL` applies the same check to `probe`, `status` and `auto`; `auto` then launches on the default org when the preferred org refuses that model.
 
 The **preferred org** (used by `auto`, `watch`, and as `proxy`'s first candidate) resolves in this order: `CLAUDE_ORG_PREFER` -> first entry of `CLAUDE_ORG_ORDER` -> first `.token` file alphabetically.
 

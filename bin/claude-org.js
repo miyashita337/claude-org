@@ -11,14 +11,18 @@ const { watch } = require('../lib/watch');
 const { proxyLaunch } = require('../lib/proxy');
 
 // `--model <id>` / `--model=<id>` for probe and status. Returns the model
-// ('' when absent) and the remaining args.
+// ('' when absent) and the remaining args. A missing value is an error rather
+// than a silent fall back to the default model.
 function takeModel(args) {
   const rest = [];
   let model = '';
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--model') model = args[++i] || '';
-    else if (args[i].startsWith('--model=')) model = args[i].slice(8);
-    else rest.push(args[i]);
+    if (args[i] === '--model' || args[i].startsWith('--model=')) {
+      model = args[i] === '--model' ? args[++i] : args[i].slice(8);
+      if (!model || model.startsWith('-')) throw new Error('--model needs a model id, e.g. --model claude-fable-5-1');
+    } else {
+      rest.push(args[i]);
+    }
   }
   return { model, rest };
 }
