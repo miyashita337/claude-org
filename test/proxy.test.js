@@ -399,4 +399,8 @@ test('P24: state file records the last org and model', async t => {
   st = JSON.parse(raw);
   assert.deepStrictEqual([st.org, st.model], ['a', 'gated']);
   assert.doesNotMatch(raw, /tok-|"hi"/);
+  // a model name longer than the 80-char log cut is kept whole
+  const long = `m${'x'.repeat(100)}`;
+  await post(p.port, '/v1/messages', {}, bodyFor(long));
+  assert.strictEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')).model, long);
 });
