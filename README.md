@@ -140,7 +140,7 @@ npm run release -- patch --dry-run      # checks + tests only, changes nothing
 npm run release -- patch                # or minor / major / X.Y.Z
 ```
 
-The script refuses to run off `main`, with uncommitted tracked changes, out of sync with `origin/main`, with an existing tag or registry version, or without npm login. It then runs the tests, renames `## Unreleased` to the new version heading, bumps `package.json`, commits `chore: release vX.Y.Z`, tags, pushes, runs `npm publish` and waits until the registry serves the new version. `--no-publish` stops after the push.
+The script refuses to run off `main`, with uncommitted tracked changes, out of sync with `origin/main`, with an existing tag or registry version, with files npm would publish that git does not track, or without npm login. It then runs the tests, renames `## Unreleased` to the new version heading, bumps `package.json`, commits `chore: release vX.Y.Z`, tags, pushes the commit and tag together (atomic), runs `npm publish` and waits until the registry serves the new version. `--no-publish` stops after the push.
 
 Users update with `npm install -g claude-org@latest`.
 

@@ -75,7 +75,34 @@ function npm(argStr, { inherit = false, allowFail = false } = {}) {
     cwd: ROOT, shell: true, encoding: 'utf8', stdio: inherit ? 'inherit' : 'pipe',
   });
   if (r.status !== 0 && !allowFail) throw new Error(`npm ${argStr} failed (exit ${r.status})`);
-  return { ok: r.status === 0, out: (r.stdout || '').trim() };
+  return { ok: r.status === 0, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() };
+}
+
+// The informative part of npm's stderr: its "npm error" lines without the
+// trailing "A complete log of this run can be found in ..." pointer.
+function npmError(err) {
+  const lines = err.split('\n').map(l => l.trim())
+    .filter(l => /^npm (error|ERR!)/.test(l) && !/complete log of this run/.test(l));
+  return (lines.slice(0, 2).join(' / ') || err.split('\n').pop() || 'no error output').slice(0, 300);
+}
+
+// Whether name@version is on the registry. A failed lookup is an error, not
+// "not published": only a clean empty answer or E404 means it is absent.
+function publishedOnRegistry(name, version) {
+  const r = npm(`view ${name}@${version} version`, { allowFail: true });
+  if (r.ok) return r.out === version;
+  if (/E404|404 Not Found/.test(r.err)) return false;
+  throw new Error(`could not ask the npm registry about ${name}@${version}: ${npmError(r.err)}`);
+}
+
+// Files npm would pack that git does not track (for example a stray file in
+// lib/). They would be published without being part of the release tag.
+function untrackedPackedFiles() {
+  const r = npm('pack --dry-run --json', { allowFail: true });
+  if (!r.ok) throw new Error(`npm pack --dry-run failed: ${npmError(r.err)}`);
+  const packed = JSON.parse(r.out)[0].files.map(f => f.path.replace(/\\/g, '/'));
+  const tracked = new Set(git(['ls-files']).out.split('\n'));
+  return packed.filter(p => !tracked.has(p));
 }
 
 function sleep(ms) {
@@ -115,8 +142,12 @@ function main(argv) {
   if (git(['rev-parse', '-q', '--verify', `refs/tags/${tag}`], { allowFail: true }).ok) {
     throw new Error(`tag ${tag} already exists`);
   }
-  if (npm(`view ${pkg.name}@${version} version`, { allowFail: true }).out === version) {
+  if (publishedOnRegistry(pkg.name, version)) {
     throw new Error(`${pkg.name}@${version} is already on the npm registry`);
+  }
+  const stray = untrackedPackedFiles();
+  if (stray.length) {
+    throw new Error(`npm would publish files that git does not track: ${stray.join(', ')}`);
   }
   if (publish && !npm('whoami', { allowFail: true }).ok) {
     throw new Error('not logged in to npm; run "npm login" first (or pass --no-publish)');
@@ -140,11 +171,11 @@ function main(argv) {
   git(['commit', '-q', '-m', `chore: release ${tag}`]);
   git(['tag', tag]);
   say(`committed and tagged ${tag}`);
+  // --atomic: the remote gets both the commit and the tag, or neither.
   try {
-    git(['push', '-q', REMOTE, BRANCH]);
-    git(['push', '-q', REMOTE, tag]);
+    git(['push', '-q', '--atomic', REMOTE, BRANCH, tag]);
   } catch (e) {
-    throw new Error(`${e.message}\nThe release commit and tag exist only locally. Fix the push problem, then run:\n  git push ${REMOTE} ${BRANCH} && git push ${REMOTE} ${tag}${publish ? ' && npm publish' : ''}`);
+    throw new Error(`${e.message}\nNothing was pushed; the release commit and tag exist only locally. Fix the push problem, then run:\n  git push --atomic ${REMOTE} ${BRANCH} ${tag}${publish ? ' && npm publish' : ''}`);
   }
   say(`pushed ${BRANCH} and ${tag}`);
 
