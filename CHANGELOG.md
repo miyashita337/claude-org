@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Development: `npm run release -- <patch|minor|major|X.Y.Z>` runs the whole release (checks, tests, CHANGELOG, version, commit, tag, push, npm publish, registry check)
+
 ## 0.2.1 — 2026-10-10
 
 - `proxy`: a 429 is now classified before failing over (#8). Only a rejected 5h or 7d window takes the whole org out. Any other 429 (a used-up per-model allowance, a model that needs usage credits, a per-minute limit) takes the org out for that model only, for at most 10 minutes or the `retry-after` time, so other models keep using the org

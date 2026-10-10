@@ -130,6 +130,20 @@ npm test            # node:test suite, no real API calls
 npm pack --dry-run  # inspect the published file set
 ```
 
+### Releasing
+
+Write the changes under `## Unreleased` in `CHANGELOG.md`, then on an up-to-date `main`:
+
+```sh
+npm login                               # once per machine
+npm run release -- patch --dry-run      # checks + tests only, changes nothing
+npm run release -- patch                # or minor / major / X.Y.Z
+```
+
+The script refuses to run off `main`, with uncommitted tracked changes, out of sync with `origin/main`, with an existing tag or registry version, or without npm login. It then runs the tests, renames `## Unreleased` to the new version heading, bumps `package.json`, commits `chore: release vX.Y.Z`, tags, pushes, runs `npm publish` and waits until the registry serves the new version. `--no-publish` stops after the push.
+
+Users update with `npm install -g claude-org@latest`.
+
 ## License
 
 MIT
