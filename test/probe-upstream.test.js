@@ -150,6 +150,21 @@ test('status --model shows model_status for every org', async () => {
   assert.strictEqual((r.stdout.match(/model=gated model_status=unavailable/g) || []).length, 2, r.stdout);
 });
 
+test('--model without a value is an error', () => {
+  const dir = makeTokenDir({ team: 'dummy-token-team' });
+  for (const args of [['probe', 'team', '--model'], ['probe', '--model', '--x'], ['status', '--model=']]) {
+    const r = runBin(args, { CLAUDE_ORG_TOKEN_DIR: dir, CLAUDE_ORG_UPSTREAM: 'http://127.0.0.1:1' });
+    assert.strictEqual(r.status, 1, args.join(' '));
+    assert.match(r.stderr, /--model needs a model id/);
+  }
+});
+
+test('a model id with spaces keeps the probe line on one key=value line', async () => {
+  const r = await probeWith(['probe', 'team', '--model', 'a b\nc']);
+  assert.match(r.stdout, / model=a_b_c model_status=available$/m);
+  assert.strictEqual(r.stdout.trim().split('\n').length, 1);
+});
+
 test('probe does not leak the token on failure', () => {
   const dir = makeTokenDir({ team: 'secret-token-value' });
   const r = runBin(['probe', 'team'], {
