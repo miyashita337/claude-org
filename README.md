@@ -86,7 +86,9 @@ claude-org proxy --resume
 3. The proxy replaces the `Authorization` header with a real org token and forwards to `api.anthropic.com`. On a 429 or `anthropic-ratelimit-unified-5h-status: rejected` it marks that org limited until `5h-reset` and **resends the same request** with the next org's token.
 4. Claude Code only ever sees the successful response — the org switched mid-session. SSE streaming is piped through untouched.
 
-One log line per request (`via <org> model=<model> -> <status>`) goes to a temp file printed at launch (`-> proxy 127.0.0.1:<port> (order: ..., log: ...)`). The prompt and the tokens are never logged.
+One log line per request (`via <org> model=<model> -> <status>`) goes to a temp file printed at launch (`-> proxy 127.0.0.1:<port> (order: ..., strategy: ..., log: ...)`). The prompt and the tokens are never logged.
+
+**Spreading load by utilization**: with `CLAUDE_ORG_STRATEGY=least-utilized`, the proxy remembers the `5h-utilization` each org last reported and sends each request to the usable org with the lowest value. An org that has not reported yet is tried first (in priority order) so it gets measured once. Rate-limited orgs are still skipped. Utilization is a share of each org's own plan, not an absolute amount, so a larger plan is picked more often; if you want one org's allowance used up first (e.g. your company's), keep the default and set `CLAUDE_ORG_ORDER` instead.
 
 **Which org is in use right now**: after each model request the proxy writes `{"org", "model", "status", "at"}` as JSON (`org` is `null` with `status` 503 when no org could serve) to `state.json` in the same temp directory as the log. Its path is exported to the `claude` process as `CLAUDE_ORG_STATE_FILE`, so a statusline command or hook can show it, e.g.:
 
@@ -120,6 +122,7 @@ A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat t
 |---|---|---|
 | `CLAUDE_ORG_PREFER` | (unset) | Preferred org for `auto` / `watch` / `proxy` |
 | `CLAUDE_ORG_ORDER` | (unset) | Comma-separated org priority for `proxy`; unlisted orgs follow alphabetically |
+| `CLAUDE_ORG_STRATEGY` | (unset: priority order) | `least-utilized`: `proxy` sends each request to the usable org with the lowest 5h utilization (see proxy mode) |
 | `CLAUDE_ORG_PROBE_MODEL` | (unset: Haiku) | Model used by `probe` / `status` / `auto` to check the org; adds `model_status=` to the probe line |
 | `CLAUDE_ORG_TOKEN_DIR` | `~/.claude/org-tokens` | Where `<name>.token` files live |
 | `CLAUDE_ORG_NOTIFY_CMD` | (unset) | `watch` notification command, run as `<cmd> "<title>" "<message>"` via the OS shell |
