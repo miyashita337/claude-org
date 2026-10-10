@@ -57,12 +57,21 @@ Repeat steps 1–2 **once per org**:
 | `claude-org proxy [claude args...]` | Launch via a local proxy: a **running** session fails over to another org the moment the 5h limit hits. Needs 2+ org tokens (incl. one for the default side). |
 | `claude-org auto [claude args...]` | Launch on the preferred org if usable, else on the default org. Decided once at launch. |
 | `claude-org <name> [claude args...]` | Launch with that org's token, e.g. `claude-org work --resume`. |
-| `claude-org probe [<name>]` | Print the org's 5h window state on one line (`status= 5h_util= 5h_reset= 5h_reset_local=`). Exit 0 when `allowed`. |
+| `claude-org probe [<name>] [--model <id>]` | Print the org's 5h window state on one line (`status= 5h_util= 5h_reset= 5h_reset_local=`). Exit 0 when `allowed`. With `--model`, probe with that model and append `model= model_status=` (see below). |
 | `claude-org watch` | Poll the preferred org until its window recovers, then notify (terminal + optional `CLAUDE_ORG_NOTIFY_CMD`). |
-| `claude-org status` | `claude auth status` for every saved token + the default login. |
+| `claude-org status [--model <id>]` | `claude auth status` and `probe` for every saved token + the default login. |
 | `claude-org list` | List saved org names. |
 
 `auto` and `<name>` only read env at launch — they cannot switch a running session. Settings, plugins, and session history live under `~/.claude/` and are shared across orgs, so `claude-org auto --resume` continues a session started under the other org.
+
+**Checking a model, not just the window**: `probe` and `status` use Haiku by default, but an org can show `status=allowed` and still refuse another model (for example one that needs usage credits). Pass the model your session uses:
+
+```sh
+claude-org probe work --model claude-fable-5-1
+# status=allowed 5h_util=0.34 ... model=claude-fable-5-1 model_status=unavailable model_error=rate_limit_error
+```
+
+`model_status` is `available` (2xx), `unavailable` (refused while the 5h/7d windows are not rejected; exit 1) or `unknown` (no response, bad token or permission, timeout, server error, or a rejected window; the exit code then follows `status` alone). Setting `CLAUDE_ORG_PROBE_MODEL` applies the same check to `probe`, `status` and `auto`; `auto` then launches on the default org when the preferred org refuses that model.
 
 The **preferred org** (used by `auto`, `watch`, and as `proxy`'s first candidate) resolves in this order: `CLAUDE_ORG_PREFER` -> first entry of `CLAUDE_ORG_ORDER` -> first `.token` file alphabetically.
 
@@ -77,7 +86,9 @@ claude-org proxy --resume
 3. The proxy replaces the `Authorization` header with a real org token and forwards to `api.anthropic.com`. On a 429 or `anthropic-ratelimit-unified-5h-status: rejected` it marks that org limited until `5h-reset` and **resends the same request** with the next org's token.
 4. Claude Code only ever sees the successful response — the org switched mid-session. SSE streaming is piped through untouched.
 
-One log line per request (`via <org> model=<model> -> <status>`) goes to a temp file printed at launch (`-> proxy 127.0.0.1:<port> (order: ..., log: ...)`). The prompt and the tokens are never logged.
+One log line per request (`via <org> model=<model> -> <status>`) goes to a temp file printed at launch (`-> proxy 127.0.0.1:<port> (order: ..., strategy: ..., log: ...)`). The prompt and the tokens are never logged.
+
+**Spreading load by utilization**: with `CLAUDE_ORG_STRATEGY=least-utilized`, the proxy remembers the `5h-utilization` each org last reported and sends each request to the usable org with the lowest value. An org that has not reported yet is tried first (in priority order) so it gets measured once; one that answers without a utilization goes after the measured ones. A value is forgotten when that org's 5h window resets. Rate-limited orgs are still skipped. Utilization is a share of each org's own plan, not an absolute amount, so a larger plan is picked more often; if you want one org's allowance used up first (e.g. your company's), keep the default and set `CLAUDE_ORG_ORDER` instead.
 
 **Which org is in use right now**: after each model request the proxy writes `{"org", "model", "status", "at"}` as JSON (`org` is `null` with `status` 503 when no org could serve) to `state.json` in the same temp directory as the log. Its path is exported to the `claude` process as `CLAUDE_ORG_STATE_FILE`, so a statusline command or hook can show it, e.g.:
 
@@ -89,6 +100,14 @@ One log line per request (`via <org> model=<model> -> <status>`) goes to a temp 
 
 - claude.ai connector MCPs (Gmail / Drive / Calendar / Notion / Slack …) and Remote Control are **unavailable**: `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat the session as external-token auth, so `mcp__claude_ai_*` tools do not appear. Local/plugin MCPs work. Open connectors in a plain `claude --resume` session — history is shared.
 - Each proxy serves one session and dies when `claude` exits.
+
+**Subagents**
+
+- Subagents started with Claude Code's Agent tool run in the same process as the parent session and share its `ANTHROPIC_BASE_URL`, so they go through the same proxy with no setup and use the same orgs' limits. Their requests appear in the proxy log with their own `model=` (e.g. a Haiku subagent).
+- Not covered: a `claude` started as a separate process (it needs its own `claude-org proxy`), and agents that run in the cloud (e.g. `isolation: remote`).
+- The connector MCP limitation above applies to subagents too.
+- When an org's 5h or 7d window is rejected, the org is taken out for every model, so subagents also move to the next org until the window resets. A 429 for one model only (#8) moves that model only; other models, including those of subagents, stay on the org.
+- Work routed to a Team / Enterprise org (e.g. your company's) counts toward that org's usage, which its admins can see.
 
 ### Prompt cache & tool search
 
@@ -111,6 +130,8 @@ A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat t
 |---|---|---|
 | `CLAUDE_ORG_PREFER` | (unset) | Preferred org for `auto` / `watch` / `proxy` |
 | `CLAUDE_ORG_ORDER` | (unset) | Comma-separated org priority for `proxy`; unlisted orgs follow alphabetically |
+| `CLAUDE_ORG_STRATEGY` | (unset: priority order) | `least-utilized`: `proxy` sends each request to the usable org with the lowest 5h utilization (see proxy mode) |
+| `CLAUDE_ORG_PROBE_MODEL` | (unset: Haiku) | Model used by `probe` / `status` / `auto` to check the org; adds `model_status=` to the probe line |
 | `CLAUDE_ORG_TOKEN_DIR` | `~/.claude/org-tokens` | Where `<name>.token` files live |
 | `CLAUDE_ORG_NOTIFY_CMD` | (unset) | `watch` notification command, run as `<cmd> "<title>" "<message>"` via the OS shell |
 | `CLAUDE_ORG_WATCH_MAX_SLEEP` | `18000` | Max seconds between `watch` re-checks (values < 60 also lower the 60s minimum — for tests) |

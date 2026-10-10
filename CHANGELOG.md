@@ -3,6 +3,9 @@
 ## Unreleased
 
 - `proxy`: each log line now names the model (`via <org> model=<model> -> <status>`), and the org and model of the last request are written to a JSON state file whose path is passed to `claude` as `CLAUDE_ORG_STATE_FILE`, for statusline and hooks (#12)
+- `probe` / `status`: `--model <id>` (or `CLAUDE_ORG_PROBE_MODEL`) checks that model instead of Haiku and appends `model_status=available|unavailable|unknown` (and `model_error=` when refused), so "5h allowed but this model is refused" is told apart. `auto` falls back to the default org when the preferred org refuses the model (#9)
+- `proxy`: `CLAUDE_ORG_STRATEGY=least-utilized` sends each request to the usable org with the lowest 5h utilization it has reported (orgs not yet measured are tried first). Unset keeps the priority order; the launch line and the log now show the strategy (#7)
+- Docs: proxy mode now explains that Agent-tool subagents go through the same proxy and what that implies (#16)
 
 ## 0.2.2 — 2026-10-10
 
