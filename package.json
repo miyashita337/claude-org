@@ -19,7 +19,8 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "release": "node scripts/release.js"
   },
   "keywords": [
     "claude-code",
