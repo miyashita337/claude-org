@@ -10,6 +10,19 @@ const { statusAll } = require('../lib/status');
 const { watch } = require('../lib/watch');
 const { proxyLaunch } = require('../lib/proxy');
 
+// `--model <id>` / `--model=<id>` for probe and status. Returns the model
+// ('' when absent) and the remaining args.
+function takeModel(args) {
+  const rest = [];
+  let model = '';
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--model') model = args[++i] || '';
+    else if (args[i].startsWith('--model=')) model = args[i].slice(8);
+    else rest.push(args[i]);
+  }
+  return { model, rest };
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   switch (cmd) {
@@ -23,11 +36,12 @@ async function main() {
       for (const o of listOrgs()) console.log(o);
       return 0;
     case 'status':
-      return statusAll();
+      return statusAll(takeModel(rest).model || undefined);
     case 'probe': {
-      const r = await probe(rest[0] || resolvePrefer());
+      const { model, rest: names } = takeModel(rest);
+      const r = await probe(names[0] || resolvePrefer(), model || undefined);
       if (r.line) console.log(r.line);
-      return r.allowed ? 0 : 1;
+      return r.usable ? 0 : 1;
     }
     case 'pick':
       console.log(await pick());
