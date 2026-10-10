@@ -77,7 +77,13 @@ function modelUpstream() {
     req.on('end', () => {
       const model = JSON.parse(Buffer.concat(chunks).toString()).model;
       seen.push(model);
-      // "bare": refused with no window headers, as Fable 5.1 was on 2026-10-10
+      // "bare": refused with no window headers, as Fable 5.1 was on 2026-10-10.
+      // With the "limited" token the 5h window itself is rejected (seen only on
+      // the Haiku re-check; "bare" still gets the header-less 429 below).
+      if (req.headers.authorization === 'Bearer dummy-token-limited' && model !== 'bare') {
+        res.writeHead(429, { 'anthropic-ratelimit-unified-5h-status': 'rejected' });
+        return res.end('{"type":"error","error":{"type":"rate_limit_error"}}');
+      }
       if (model === 'bare') {
         res.writeHead(429, { 'content-type': 'application/json' });
         return res.end('{"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required"}}');
@@ -122,6 +128,22 @@ test('a refusal without window headers still reports the 5h state', async () => 
   assert.deepStrictEqual(r.seen, ['bare', 'claude-haiku-4-5-20251001']);
   assert.strictEqual(r.status, 1);
   assert.match(r.stdout, /^status=allowed 5h_util=0\.1 .* model=bare model_status=unavailable model_error=rate_limit_error$/m);
+});
+
+test('a header-less refusal on a 5h-rejected org is not blamed on the model', async () => {
+  const { server, seen } = await modelUpstream();
+  try {
+    const dir = makeTokenDir({ lim: 'dummy-token-limited' });
+    const r = await runBinAsync(['probe', 'lim', '--model', 'bare'], {
+      CLAUDE_ORG_TOKEN_DIR: dir,
+      CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${server.address().port}`,
+    });
+    assert.deepStrictEqual(seen, ['bare', 'claude-haiku-4-5-20251001']);
+    assert.strictEqual(r.status, 1);
+    assert.match(r.stdout, /^status=rejected .* model=bare model_status=unknown$/m);
+  } finally {
+    server.close();
+  }
 });
 
 test('CLAUDE_ORG_PROBE_MODEL sets the probe model', async () => {
