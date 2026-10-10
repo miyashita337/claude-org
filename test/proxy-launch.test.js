@@ -6,6 +6,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
 const { tmpdir, makeTokenDir, makeClaudeStub, runBinAsync } = require('./helpers');
 
 function stubUpstream() {
@@ -45,6 +46,16 @@ test('P8: proxy subcommand wires env, serves, and cleans up', async () => {
     assert.match(r.stdout, /^ttl=1h$/m, `CLAUDE_CODE_PROMPT_CACHE_TTL default missing: ${r.stdout}`);
     assert.match(r.stdout, /^toolsearch=true$/m, `ENABLE_TOOL_SEARCH default missing: ${r.stdout}`);
     assert.match(r.stderr, /^-> proxy 127\.0\.0\.1:/m);
+    // Issue #12: claude (and so its statusline / hooks) can read the org and
+    // model in use, and the log line names the model without the prompt.
+    const st = r.stdout.match(/^state=(.*)$/m);
+    assert.ok(st, `no state= line: ${r.stdout}`);
+    const state = JSON.parse(st[1]);
+    assert.deepStrictEqual([state.org, state.model], ['a', 'stub-model']);
+    const logf = r.stderr.match(/log: (.+)\)$/m)[1];
+    const logText = fs.readFileSync(logf, 'utf8');
+    assert.match(logText, /via a model=stub-model -> 200 /);
+    assert.doesNotMatch(logText, /STUB-PROMPT|tok-a/);
     // After exit, the proxy must be gone.
     await new Promise(r2 => setTimeout(r2, 500));
     await assert.rejects(

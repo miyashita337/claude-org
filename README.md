@@ -77,7 +77,13 @@ claude-org proxy --resume
 3. The proxy replaces the `Authorization` header with a real org token and forwards to `api.anthropic.com`. On a 429 or `anthropic-ratelimit-unified-5h-status: rejected` it marks that org limited until `5h-reset` and **resends the same request** with the next org's token.
 4. Claude Code only ever sees the successful response — the org switched mid-session. SSE streaming is piped through untouched.
 
-One log line per request (`via <org> -> <status>`) goes to a temp file printed at launch (`-> proxy 127.0.0.1:<port> (order: ..., log: ...)`).
+One log line per request (`via <org> model=<model> -> <status>`) goes to a temp file printed at launch (`-> proxy 127.0.0.1:<port> (order: ..., log: ...)`). The prompt and the tokens are never logged.
+
+**Which org is in use right now**: after each model request the proxy writes `{"org", "model", "status", "at"}` as JSON (`org` is `null` with `status` 503 when no org could serve) to `state.json` in the same temp directory as the log. Its path is exported to the `claude` process as `CLAUDE_ORG_STATE_FILE`, so a statusline command or hook can show it, e.g.:
+
+```sh
+[ -n "$CLAUDE_ORG_STATE_FILE" ] && [ -f "$CLAUDE_ORG_STATE_FILE" ] && node -p "require(process.env.CLAUDE_ORG_STATE_FILE).org"
+```
 
 **Limitations of proxy mode**
 
@@ -110,6 +116,7 @@ A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat t
 | `CLAUDE_ORG_WATCH_MAX_SLEEP` | `18000` | Max seconds between `watch` re-checks (values < 60 also lower the 60s minimum — for tests) |
 | `CLAUDE_ORG_UPSTREAM` | `https://api.anthropic.com` | API base URL for `probe` and `proxy` (stub upstream in tests) |
 | `CLAUDE_ORG_PROXY` | `1` when launched via `proxy` | Marker env passed to the claude process so user hooks can detect connector-less sessions |
+| `CLAUDE_ORG_STATE_FILE` | set when launched via `proxy` | Path of the JSON file holding the org and model of the last request (read it from a statusline or hook) |
 | `CLAUDE_ORG_FORCE_PROBE` | (unset) | Test seam: `allowed` / `rejected[:<epoch>]` / `rejected_until:<epoch>` fakes `probe` results without API calls |
 | `CLAUDE_ORG_REJECT_FILE` | (unset) | Test seam: orgs listed comma-separated in this file are treated as rate-limited by `proxy` |
 
