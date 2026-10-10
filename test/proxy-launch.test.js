@@ -93,7 +93,9 @@ test('P11: user-set cache TTL / tool search env are preserved', async () => {
       CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
       CLAUDE_CODE_PROMPT_CACHE_TTL: '5m',
       ENABLE_TOOL_SEARCH: 'false',
+      CLAUDE_ORG_STRATEGY: 'least-utilized',
     });
+    assert.match(r.stderr, /strategy: least-utilized,/, 'CLAUDE_ORG_STRATEGY not picked up by proxy');
     assert.match(r.stdout, /^ttl=5m$/m, `user env overwritten: ${r.stdout}`);
     assert.match(r.stdout, /^toolsearch=false$/m, `user env overwritten: ${r.stdout}`);
   } finally {
