@@ -112,12 +112,18 @@ test.before(async () => {
         }, 50);
         return;
       }
-      // tok-u<NN>: reports a 5h utilization of 0.<NN> (default 0.25)
-      const um = tok.match(/^tok-u(\d\d)$/);
+      // tok-u<NN>: reports a 5h utilization of 0.<NN> (default 0.25), with a
+      // reset in an hour, or already past with the "p" suffix (tok-u<NN>p).
+      // tok-nou: reports no utilization at all.
+      const um = tok.match(/^tok-u(\d\d)(p?)$/);
+      const utilHeaders = tok === 'tok-nou' ? {} : {
+        'anthropic-ratelimit-unified-5h-utilization': um ? `0.${um[1]}` : '0.25',
+        'anthropic-ratelimit-unified-5h-reset': um && um[2] ? String(Math.floor(Date.now() / 1000) - 10) : inAnHour(),
+      };
       res.writeHead(200, {
         'content-type': 'application/json',
         'anthropic-ratelimit-unified-5h-status': 'allowed',
-        'anthropic-ratelimit-unified-5h-utilization': um ? `0.${um[1]}` : '0.25',
+        ...utilHeaders,
         'x-seen-api-key': seenKey,
         'x-served-token': tok,
         'x-seen-beta': req.headers['anthropic-beta'] || '<none>',
@@ -438,6 +444,23 @@ test('P27: least-utilized still skips a rate-limited org', async t => {
   await servedBy(p.port, 2);
   fs.writeFileSync(rf, 'low');
   assert.deepStrictEqual(await servedBy(p.port, 2), ['high', 'high']);
+});
+
+// P29: an org that never reports a utilization does not stay first forever
+test('P29: least-utilized moves an org without utilization behind measured ones', async t => {
+  const dir = makeTokenDir({ blind: 'tok-nou', mid: 'tok-u50' });
+  const p = await startProxy(t, { order: ['blind', 'mid'], dir, strategy: 'least-utilized' });
+  assert.deepStrictEqual(await servedBy(p.port, 4), ['blind', 'mid', 'mid', 'mid']);
+});
+
+// P30: a utilization whose 5h window has reset is measured again, so an org
+// is not avoided for its old high value
+test('P30: least-utilized forgets a utilization after its window resets', async t => {
+  const dir = makeTokenDir({ reset: 'tok-u90p', low: 'tok-u10' });
+  const p = await startProxy(t, { order: ['reset', 'low'], dir, strategy: 'least-utilized' });
+  // its 0.90 is already past the reset each time, so it is never ranked behind
+  // low's 0.10 (with the stale value it would be: reset, low, low)
+  assert.deepStrictEqual(await servedBy(p.port, 3), ['reset', 'reset', 'reset']);
 });
 
 // P28: an unknown strategy value is reported, not silently ignored
