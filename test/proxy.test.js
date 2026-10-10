@@ -112,10 +112,18 @@ test.before(async () => {
         }, 50);
         return;
       }
+      // tok-u<NN>: reports a 5h utilization of 0.<NN> (default 0.25), with a
+      // reset in an hour, or already past with the "p" suffix (tok-u<NN>p).
+      // tok-nou: reports no utilization at all.
+      const um = tok.match(/^tok-u(\d\d)(p?)$/);
+      const utilHeaders = tok === 'tok-nou' ? {} : {
+        'anthropic-ratelimit-unified-5h-utilization': um ? `0.${um[1]}` : '0.25',
+        'anthropic-ratelimit-unified-5h-reset': um && um[2] ? String(Math.floor(Date.now() / 1000) - 10) : inAnHour(),
+      };
       res.writeHead(200, {
         'content-type': 'application/json',
         'anthropic-ratelimit-unified-5h-status': 'allowed',
-        'anthropic-ratelimit-unified-5h-utilization': '0.25',
+        ...utilHeaders,
         'x-seen-api-key': seenKey,
         'x-served-token': tok,
         'x-seen-beta': req.headers['anthropic-beta'] || '<none>',
@@ -134,7 +142,7 @@ function tokenDir() {
 }
 
 // Start an in-process proxy; returns { port, logs, close }.
-async function startProxy(t, { order = [], rejectFile = '', dir = null, stateFile = '' } = {}) {
+async function startProxy(t, { order = [], rejectFile = '', dir = null, stateFile = '', strategy = '' } = {}) {
   const logs = [];
   const { server } = createProxy({
     tokenDir: dir || tokenDir(),
@@ -142,6 +150,7 @@ async function startProxy(t, { order = [], rejectFile = '', dir = null, stateFil
     upstream: `http://127.0.0.1:${upPort}`,
     rejectFile,
     stateFile,
+    strategy,
     log: { write: s => { logs.push(s); return true; } },
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
@@ -403,4 +412,61 @@ test('P24: state file records the last org and model', async t => {
   const long = `m${'x'.repeat(100)}`;
   await post(p.port, '/v1/messages', {}, bodyFor(long));
   assert.strictEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')).model, long);
+});
+
+// Orgs that served each of n requests, in order.
+async function servedBy(port, n) {
+  const out = [];
+  for (let i = 0; i < n; i++) out.push((await post(port, '/v1/messages')).headers.get('x-claude-org'));
+  return out;
+}
+
+// P25: least-utilized measures each org once, then sticks to the lowest (Issue #7)
+test('P25: least-utilized prefers the org with the lowest 5h utilization', async t => {
+  const dir = makeTokenDir({ high: 'tok-u90', low: 'tok-u10' });
+  const p = await startProxy(t, { order: ['high', 'low'], dir, strategy: 'least-utilized' });
+  assert.deepStrictEqual(await servedBy(p.port, 4), ['high', 'low', 'low', 'low']);
+});
+
+// P26: without the strategy the static order is kept (backward compatible)
+test('P26: default strategy keeps the static order', async t => {
+  const dir = makeTokenDir({ high: 'tok-u90', low: 'tok-u10' });
+  const p = await startProxy(t, { order: ['high', 'low'], dir });
+  assert.deepStrictEqual(await servedBy(p.port, 3), ['high', 'high', 'high']);
+});
+
+// P27: a rate-limited org is skipped even when its utilization is the lowest
+test('P27: least-utilized still skips a rate-limited org', async t => {
+  const rf = path.join(tmpdir(), 'reject.txt');
+  fs.writeFileSync(rf, '');
+  const dir = makeTokenDir({ high: 'tok-u90', low: 'tok-u10' });
+  const p = await startProxy(t, { order: ['high', 'low'], dir, strategy: 'least-utilized', rejectFile: rf });
+  await servedBy(p.port, 2);
+  fs.writeFileSync(rf, 'low');
+  assert.deepStrictEqual(await servedBy(p.port, 2), ['high', 'high']);
+});
+
+// P29: an org that never reports a utilization does not stay first forever
+test('P29: least-utilized moves an org without utilization behind measured ones', async t => {
+  const dir = makeTokenDir({ blind: 'tok-nou', mid: 'tok-u50' });
+  const p = await startProxy(t, { order: ['blind', 'mid'], dir, strategy: 'least-utilized' });
+  assert.deepStrictEqual(await servedBy(p.port, 4), ['blind', 'mid', 'mid', 'mid']);
+});
+
+// P30: a utilization whose 5h window has reset is measured again, so an org
+// is not avoided for its old high value
+test('P30: least-utilized forgets a utilization after its window resets', async t => {
+  const dir = makeTokenDir({ reset: 'tok-u90p', low: 'tok-u10' });
+  const p = await startProxy(t, { order: ['reset', 'low'], dir, strategy: 'least-utilized' });
+  // its 0.90 is already past the reset each time, so it is never ranked behind
+  // low's 0.10 (with the stale value it would be: reset, low, low)
+  assert.deepStrictEqual(await servedBy(p.port, 3), ['reset', 'reset', 'reset']);
+});
+
+// P28: an unknown strategy value is reported, not silently ignored
+test('P28: unknown strategy is logged and the static order is used', async t => {
+  const dir = makeTokenDir({ high: 'tok-u90', low: 'tok-u10' });
+  const p = await startProxy(t, { order: ['high', 'low'], dir, strategy: 'lowest' });
+  assert.ok(p.logs.some(l => l.includes('unknown CLAUDE_ORG_STRATEGY "lowest"')), p.logs.join(''));
+  assert.deepStrictEqual(await servedBy(p.port, 2), ['high', 'high']);
 });
