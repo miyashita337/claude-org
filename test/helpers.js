@@ -31,9 +31,23 @@ console.log('ttl=' + (process.env.CLAUDE_CODE_PROMPT_CACHE_TTL || '<unset>'));
 console.log('toolsearch=' + (process.env.ENABLE_TOOL_SEARCH || '<unset>'));
 const base = process.env.ANTHROPIC_BASE_URL;
 if (base) {
-  fetch(base + '/v1/models', { method: 'POST', body: '' })
-    .then(r => console.log('proxy_alive=' + r.status))
-    .catch(() => console.log('proxy_alive=000'));
+  (async () => {
+    try {
+      const r = await fetch(base + '/v1/models', { method: 'POST', body: '' });
+      console.log('proxy_alive=' + r.status);
+    } catch {
+      console.log('proxy_alive=000');
+      return;
+    }
+    // One model request, then what a statusline would read from the state file.
+    await fetch(base + '/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'STUB-PROMPT' }] }),
+    }).catch(() => {});
+    const fs = require('fs');
+    const f = process.env.CLAUDE_ORG_STATE_FILE;
+    console.log('state=' + (f && fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim() : '<none>'));
+  })();
 }
 `;
 
