@@ -79,7 +79,7 @@ claude-org proxy --resume
 
 One log line per request (`via <org> model=<model> -> <status>`) goes to a temp file printed at launch (`-> proxy 127.0.0.1:<port> (order: ..., log: ...)`). The prompt and the tokens are never logged.
 
-**Which org is in use right now**: after each model request the proxy writes `{"org", "model", "status", "at"}` as JSON to `state.json` in the same temp directory as the log. Its path is exported to the `claude` process as `CLAUDE_ORG_STATE_FILE`, so a statusline command or hook can show it, e.g.:
+**Which org is in use right now**: after each model request the proxy writes `{"org", "model", "status", "at"}` as JSON (`org` is `null` with `status` 503 when no org could serve) to `state.json` in the same temp directory as the log. Its path is exported to the `claude` process as `CLAUDE_ORG_STATE_FILE`, so a statusline command or hook can show it, e.g.:
 
 ```sh
 [ -n "$CLAUDE_ORG_STATE_FILE" ] && [ -f "$CLAUDE_ORG_STATE_FILE" ] && node -p "require(process.env.CLAUDE_ORG_STATE_FILE).org"

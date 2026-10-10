@@ -353,6 +353,27 @@ test('P22: oversized 429 body is not buffered and the next org serves', async t 
   assert.ok(p.logs.some(l => l.includes('429 body larger than')), `log missing: ${p.logs.join('')}`);
 });
 
+// P24b: when no org can serve, the state file says so instead of keeping the
+// last org that worked (Issue #12)
+test('P24b: state file records a 503 with no org', async t => {
+  const stateFile = path.join(tmpdir(), 'state.json');
+  const logs = [];
+  const { server } = createProxy({
+    tokenDir: tokenDir(),
+    order: ['a'],
+    upstream: 'http://127.0.0.1:1',
+    rejectFile: '',
+    stateFile,
+    log: { write: s => { logs.push(s); return true; } },
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const r = await post(server.address().port, '/v1/messages', {}, bodyFor('m'));
+  assert.strictEqual(r.status, 503);
+  const st = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.deepStrictEqual([st.org, st.model, st.status], [null, 'm', 503]);
+});
+
 // P23: the log line names the model; the prompt and the token never appear (Issue #12)
 test('P23: log line has model= and no prompt or token', async t => {
   const p = await startProxy(t, { order: ['a'] });
