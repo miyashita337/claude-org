@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `proxy`: each log line now names the model (`via <org> model=<model> -> <status>`), and the org and model of the last request are written to a JSON state file whose path is passed to `claude` as `CLAUDE_ORG_STATE_FILE`, for statusline and hooks (#12)
+
 ## 0.2.2 — 2026-10-10
 
 - Development: `npm run release -- <patch|minor|major|X.Y.Z>` runs the whole release (checks, tests, CHANGELOG, version, commit, tag, push, npm publish, registry check)
