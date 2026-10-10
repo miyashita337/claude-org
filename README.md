@@ -101,6 +101,14 @@ One log line per request (`via <org> model=<model> -> <status>`) goes to a temp 
 - claude.ai connector MCPs (Gmail / Drive / Calendar / Notion / Slack …) and Remote Control are **unavailable**: `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat the session as external-token auth, so `mcp__claude_ai_*` tools do not appear. Local/plugin MCPs work. Open connectors in a plain `claude --resume` session — history is shared.
 - Each proxy serves one session and dies when `claude` exits.
 
+**Subagents**
+
+- Subagents started with Claude Code's Agent tool run in the same process as the parent session and share its `ANTHROPIC_BASE_URL`, so they go through the same proxy with no setup and use the same orgs' limits. Their requests appear in the proxy log with their own `model=` (e.g. a Haiku subagent).
+- Not covered: a `claude` started as a separate process (it needs its own `claude-org proxy`), and agents that run in the cloud (e.g. `isolation: remote`).
+- The connector MCP limitation above applies to subagents too.
+- When an org's 5h or 7d window is rejected, the org is taken out for every model, so subagents also move to the next org until the window resets. A 429 for one model only (#8) moves that model only; other models, including those of subagents, stay on the org.
+- Work routed to a Team / Enterprise org (e.g. your company's) counts toward that org's usage, which its admins can see.
+
 ### Prompt cache & tool search
 
 A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat the session as API-key auth, which changes two defaults:
