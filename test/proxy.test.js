@@ -134,13 +134,14 @@ function tokenDir() {
 }
 
 // Start an in-process proxy; returns { port, logs, close }.
-async function startProxy(t, { order = [], rejectFile = '', dir = null } = {}) {
+async function startProxy(t, { order = [], rejectFile = '', dir = null, stateFile = '' } = {}) {
   const logs = [];
   const { server } = createProxy({
     tokenDir: dir || tokenDir(),
     order,
     upstream: `http://127.0.0.1:${upPort}`,
     rejectFile,
+    stateFile,
     log: { write: s => { logs.push(s); return true; } },
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
@@ -350,4 +351,56 @@ test('P22: oversized 429 body is not buffered and the next org serves', async t 
   assert.strictEqual(r.status, 200);
   assert.strictEqual(r.headers.get('x-claude-org'), 'a');
   assert.ok(p.logs.some(l => l.includes('429 body larger than')), `log missing: ${p.logs.join('')}`);
+});
+
+// P24b: when no org can serve, the state file says so instead of keeping the
+// last org that worked (Issue #12)
+test('P24b: state file records a 503 with no org', async t => {
+  const stateFile = path.join(tmpdir(), 'state.json');
+  const logs = [];
+  const { server } = createProxy({
+    tokenDir: tokenDir(),
+    order: ['a'],
+    upstream: 'http://127.0.0.1:1',
+    rejectFile: '',
+    stateFile,
+    log: { write: s => { logs.push(s); return true; } },
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const r = await post(server.address().port, '/v1/messages', {}, bodyFor('m'));
+  assert.strictEqual(r.status, 503);
+  const st = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.deepStrictEqual([st.org, st.model, st.status], [null, 'm', 503]);
+});
+
+// P23: the log line names the model; the prompt and the token never appear (Issue #12)
+test('P23: log line has model= and no prompt or token', async t => {
+  const p = await startProxy(t, { order: ['a'] });
+  const body = JSON.stringify({ model: 'claude-x-1', max_tokens: 1, messages: [{ role: 'user', content: 'PROMPT-SECRET-TEXT' }] });
+  await post(p.port, '/v1/messages', {}, body);
+  const all = p.logs.join('');
+  assert.match(all, /POST \/v1\/messages via a model=claude-x-1 -> 200 /);
+  assert.doesNotMatch(all, /PROMPT-SECRET-TEXT/);
+  assert.doesNotMatch(all, /tok-a/);
+});
+
+// P24: the state file holds the org and model of the last response (Issue #12)
+test('P24: state file records the last org and model', async t => {
+  const stateFile = path.join(tmpdir(), 'state.json');
+  const dir = makeTokenDir({ x: 'tok-nogate-bare', a: 'tok-a' });
+  const p = await startProxy(t, { order: ['x', 'a'], dir, stateFile });
+  await post(p.port, '/v1/messages', {}, bodyFor('other'));
+  let st = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.deepStrictEqual([st.org, st.model, st.status], ['x', 'other', 200]);
+  // a model refused by x is served by a: the file follows the org that answered
+  await post(p.port, '/v1/messages', {}, bodyFor('gated'));
+  const raw = fs.readFileSync(stateFile, 'utf8');
+  st = JSON.parse(raw);
+  assert.deepStrictEqual([st.org, st.model], ['a', 'gated']);
+  assert.doesNotMatch(raw, /tok-|"hi"/);
+  // a model name longer than the 80-char log cut is kept whole
+  const long = `m${'x'.repeat(100)}`;
+  await post(p.port, '/v1/messages', {}, bodyFor(long));
+  assert.strictEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')).model, long);
 });
