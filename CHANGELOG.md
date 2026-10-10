@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.2 — 2026-10-10
+
 - Development: `npm run release -- <patch|minor|major|X.Y.Z>` runs the whole release (checks, tests, CHANGELOG, version, commit, tag, push, npm publish, registry check)
 
 ## 0.2.1 — 2026-10-10
