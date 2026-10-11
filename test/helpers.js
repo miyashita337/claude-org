@@ -10,16 +10,19 @@ function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'claude-org-test-'));
 }
 
-// { 'team': 'sk-ant-oat01-dummy-team' } -> dir containing <name>.token files
+// { 'team': 'sk-ant-oat01-dummy-team' } -> dir containing <name>.token files.
+// Files are made private (0600): the proxy refuses token files other users
+// can read.
 function makeTokenDir(files) {
   const dir = path.join(tmpdir(), 'tokens');
   fs.mkdirSync(dir, { recursive: true });
   for (const [name, content] of Object.entries(files)) {
-    fs.writeFileSync(path.join(dir, `${name}.token`), content);
+    fs.writeFileSync(path.join(dir, `${name}.token`), content, { mode: 0o600 });
   }
   return dir;
 }
 
+// What claude sends for ANTHROPIC_AUTH_TOKEN: Authorization: Bearer <value>.
 const CLAUDE_STUB_JS = `'use strict';
 const argline = 'args=' + process.argv.slice(2).join(' ');
 console.log(argline);
@@ -30,10 +33,11 @@ console.log('proxyflag=' + (process.env.CLAUDE_ORG_PROXY || '<unset>'));
 console.log('ttl=' + (process.env.CLAUDE_CODE_PROMPT_CACHE_TTL || '<unset>'));
 console.log('toolsearch=' + (process.env.ENABLE_TOOL_SEARCH || '<unset>'));
 const base = process.env.ANTHROPIC_BASE_URL;
+const headers = { authorization: 'Bearer ' + process.env.ANTHROPIC_AUTH_TOKEN };
 if (base) {
   (async () => {
     try {
-      const r = await fetch(base + '/v1/models', { method: 'POST', body: '' });
+      const r = await fetch(base + '/v1/models', { method: 'POST', body: '', headers });
       console.log('proxy_alive=' + r.status);
     } catch {
       console.log('proxy_alive=000');
@@ -42,6 +46,7 @@ if (base) {
     // One model request, then what a statusline would read from the state file.
     await fetch(base + '/v1/messages', {
       method: 'POST',
+      headers,
       body: JSON.stringify({ model: 'stub-model', messages: [{ role: 'user', content: 'STUB-PROMPT' }] }),
     }).catch(() => {});
     const fs = require('fs');
@@ -53,10 +58,14 @@ if (base) {
 
 // Fake `claude` on PATH. POSIX runs ./claude (sh wrapper), Windows resolves
 // claude.cmd; both defer to claude-stub.js so behavior is identical.
-function makeClaudeStub(dir) {
+// `js` replaces the stub's program (e.g. one that sleeps, for signal tests).
+function makeClaudeStub(dir, js = CLAUDE_STUB_JS) {
   fs.mkdirSync(dir, { recursive: true });
-  const js = path.join(dir, 'claude-stub.js');
-  fs.writeFileSync(js, CLAUDE_STUB_JS);
+  const jsFile = path.join(dir, 'claude-stub.js');
+  fs.writeFileSync(jsFile, js);
+  return writeStubWrappers(dir, jsFile);
+}
+function writeStubWrappers(dir, js) {
   const sh = path.join(dir, 'claude');
   fs.writeFileSync(sh, `#!/usr/bin/env sh\nexec node "${js.replace(/\\/g, '/')}" "$@"\n`);
   fs.chmodSync(sh, 0o755);
@@ -87,14 +96,21 @@ function runBin(args, env = {}, opts = {}) {
 // Async variant: use when the test's own event loop must stay alive
 // (e.g. the test hosts a stub server the child talks to).
 function runBinAsync(args, env = {}) {
-  return new Promise(resolve => {
-    const child = spawn(process.execPath, [BIN, ...args], { env: cleanEnv(env) });
-    let stdout = '', stderr = '';
-    child.stdout.on('data', c => { stdout += c; });
-    child.stderr.on('data', c => { stderr += c; });
+  return spawnBin(args, env).result;
+}
+
+// Like runBinAsync, but also hands out the running child (to signal it) and
+// its stdout so far (`stdout()`), before it exits.
+function spawnBin(args, env = {}) {
+  const child = spawn(process.execPath, [BIN, ...args], { env: cleanEnv(env) });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', c => { stdout += c; });
+  child.stderr.on('data', c => { stderr += c; });
+  const result = new Promise(resolve => {
     child.on('error', err => resolve({ status: 1, stdout, stderr: stderr + String(err) }));
-    child.on('close', code => resolve({ status: code, stdout, stderr }));
+    child.on('close', (code, signal) => resolve({ status: code, signal, stdout, stderr }));
   });
+  return { child, result, stdout: () => stdout, stderr: () => stderr };
 }
 
 // Standalone upstream stub as a child process (also usable when the parent
@@ -115,4 +131,4 @@ function startUpstreamProc(code) {
   });
 }
 
-module.exports = { BIN, tmpdir, makeTokenDir, makeClaudeStub, runBin, runBinAsync, startUpstreamProc };
+module.exports = { BIN, tmpdir, makeTokenDir, makeClaudeStub, runBin, runBinAsync, spawnBin, startUpstreamProc };

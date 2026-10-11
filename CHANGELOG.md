@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `proxy`: hardened for unattended use under a supervisor (#22)
+  - only the `claude` it launched can use it: a per-session secret is checked (constant time) on every request, `Host` must be `127.0.0.1:<port>`, only `GET` / `POST` / `DELETE` under `/v1/` are forwarded, and bodies over 64 MB get 413. Standalone `node lib/proxy.js` needs `CLAUDE_ORG_PROXY_SECRET`
+  - it no longer crashes or hangs: an unreadable token dir gives 503, every request handler error is caught, hop-by-hop headers are dropped, an upstream that sends nothing for 10 min is given up and the next org tried, and a `claude` that cancels or exits mid-response cancels the upstream request
+  - the launcher forwards `SIGTERM` / `SIGHUP` (and `SIGINT` without a terminal) to `claude`, waits for it, and sends `SIGKILL` after 10 s, so killing the launcher pid no longer orphans `claude`; with a terminal, Ctrl-C no longer kills the proxy under a running `claude`
+  - token files must be mode `0600` and owned by the user, org names are limited to `[A-Za-z0-9_-]`, and `CLAUDE_ORG_UPSTREAM` other than `https://api.anthropic.com` is refused unless `CLAUDE_ORG_UNSAFE_UPSTREAM=1`
+  - a 401 from an org (expired token) fails over to the next org, and "no org works" events are logged on fixed-format `ALERT ...` lines a supervisor can grep (README, "Unattended use")
+  - README: unattended runs must use proxy mode; how to keep the token dir away from `claude`'s shell and Read tool
+
 ## 0.3.0 — 2026-10-10
 
 - `proxy`: each log line now names the model (`via <org> model=<model> -> <status>`), and the org and model of the last request are written to a JSON state file whose path is passed to `claude` as `CLAUDE_ORG_STATE_FILE`, for statusline and hooks (#12)

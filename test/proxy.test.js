@@ -151,6 +151,8 @@ async function startProxy(t, { order = [], rejectFile = '', dir = null, stateFil
     rejectFile,
     stateFile,
     strategy,
+    secret: 'claude-org-proxy',
+    allowAnyUpstream: true,
     log: { write: s => { logs.push(s); return true; } },
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
@@ -373,6 +375,8 @@ test('P24b: state file records a 503 with no org', async t => {
     upstream: 'http://127.0.0.1:1',
     rejectFile: '',
     stateFile,
+    secret: 'claude-org-proxy',
+    allowAnyUpstream: true,
     log: { write: s => { logs.push(s); return true; } },
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));

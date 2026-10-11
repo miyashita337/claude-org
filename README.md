@@ -82,9 +82,10 @@ claude-org proxy --resume
 ```
 
 1. A session-scoped proxy starts on `127.0.0.1:<random port>` (one per session; no port collisions).
-2. `claude` launches with `ANTHROPIC_BASE_URL` pointing at the proxy and a **dummy** bearer token.
-3. The proxy replaces the `Authorization` header with a real org token and forwards to `api.anthropic.com`. On a 429 or `anthropic-ratelimit-unified-5h-status: rejected` it marks that org limited until `5h-reset` and **resends the same request** with the next org's token.
-4. Claude Code only ever sees the successful response — the org switched mid-session. SSE streaming is piped through untouched.
+2. `claude` launches with `ANTHROPIC_BASE_URL` pointing at the proxy and a **per-session secret** as its bearer token (`ANTHROPIC_AUTH_TOKEN`, generated with `crypto.randomBytes`; it exists only in that `claude`'s environment).
+3. The proxy serves only requests that carry that secret, name it in `Host` (`127.0.0.1:<port>`, so a web page cannot reach it by DNS rebinding) and are `GET` / `POST` / `DELETE` under `/v1/`; anything else is refused with 401 / 403 / 404 / 405 and never forwarded. Request bodies over 64 MB get 413.
+4. The proxy replaces the `Authorization` header with a real org token, drops hop-by-hop headers, and forwards to `api.anthropic.com` (any other upstream is refused unless `CLAUDE_ORG_UNSAFE_UPSTREAM=1`). On a 429 or `anthropic-ratelimit-unified-5h-status: rejected` it marks that org limited until `5h-reset` and **resends the same request** with the next org's token. An org whose token is rejected (401: expired or revoked) is skipped the same way for 10 minutes.
+5. Claude Code only ever sees the successful response — the org switched mid-session. SSE streaming is piped through untouched. When Claude Code cancels or exits mid-response, the upstream request is cancelled too; an upstream that sends nothing for 10 minutes is given up and the next org tried.
 
 One log line per request (`via <org> model=<model> -> <status>`) goes to a temp file printed at launch (`-> proxy 127.0.0.1:<port> (order: ..., strategy: ..., log: ...)`). The prompt and the tokens are never logged.
 
@@ -122,7 +123,38 @@ A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat t
 |---|---|---|---|
 | `claude` | no (default org) | yes | connector work |
 | `claude-org auto --resume` | at launch only | no on preferred org / yes on default | short tasks |
-| `claude-org proxy --resume` | **automatic** | no | long-running work, agents |
+| `claude-org proxy --resume` | **automatic** | no | long-running work, agents, unattended runs |
+
+### Unattended use (supervisors, `--dangerously-skip-permissions`)
+
+When a supervisor starts `claude` without a person watching (e.g. `claude -p` with `--dangerously-skip-permissions`), launch it through `claude-org proxy`, not `claude-org <org>` / `auto`:
+
+- **Use proxy mode only.** `claude-org <org>` and `auto` put the org token into `claude`'s environment as `CLAUDE_CODE_OAUTH_TOKEN`, where a prompt-injected `claude` can read it. In proxy mode the tokens stay in the launcher process; `claude` only holds the per-session proxy secret, which is worth nothing outside that session.
+- **Signals.** The launcher forwards `SIGTERM` / `SIGHUP` (and `SIGINT` when it has no terminal) to `claude`, waits for it to exit, and reports its exit code (`128+signal` when killed); after 10 s it sends `SIGKILL`. So a supervisor that kills the launcher pid does not leave an orphaned `claude`, and the proxy lives exactly as long as `claude` does. With a terminal, Ctrl-C goes to `claude` only (the launcher stays until `claude` exits).
+- **Keep the token files away from `claude`'s shell.** A `claude` running with permissions skipped can `cat ~/.claude/org-tokens/*.token` from Bash. The proxy refuses token files that are not mode `0600` and owned by you, but that does not stop your own `claude`. Deny the directory to sandboxed commands and to the Read tool in the settings of the project the unattended session runs in (both are needed: the sandbox covers shell commands only, the Read tool follows permission rules):
+
+  ```json
+  {
+    "permissions": { "deny": ["Read(~/.claude/org-tokens/**)"] },
+    "sandbox": {
+      "enabled": true,
+      "credentials": { "files": [{ "path": "~/.claude/org-tokens", "mode": "deny" }] }
+    }
+  }
+  ```
+
+  Source: Claude Code docs, [Configure the sandboxed Bash tool](https://code.claude.com/docs/en/sandboxing) (`sandbox.credentials.files` with `"mode": "deny"` applies the same read block as `sandbox.filesystem.denyRead`; the sandbox runs on macOS, Linux and WSL2, not native Windows). Running the proxy as a separate daemon under another user would close the gap fully; it is not implemented, and would build on the shared proxy discussed in #14 / #18.
+- **Detecting "no org works" from outside.** The proxy log (path on the `-> proxy` launch line) has one fixed-format line per such event, so a supervisor or a notifier can grep for `ALERT `:
+
+  | Line | Meaning |
+  |---|---|
+  | `ALERT token-rejected org=<org> status=401 -> run: claude setup-token ...` | that org's token is expired or revoked; the org is skipped for 10 min |
+  | `ALERT no-org-available model=<model> reason=rate-limited status=429` | every org is over its window; the 429 went to `claude` |
+  | `ALERT no-org-available model=<model> reason=model-rejected status=429` | every org refuses this model; switch the model |
+  | `ALERT no-org-available model=<model> reason=unreachable status=503` | no org answered (network, timeouts, bad token files) |
+  | `ALERT no-org-available model=<model> reason=no-tokens status=503` | the token dir is missing or has no usable `.token` file |
+
+  The state file (`CLAUDE_ORG_STATE_FILE`) records the same outcome as `status` (`503` with `"org": null`, or `401` with the org).
 
 ## Environment variables
 
@@ -135,7 +167,9 @@ A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat t
 | `CLAUDE_ORG_TOKEN_DIR` | `~/.claude/org-tokens` | Where `<name>.token` files live |
 | `CLAUDE_ORG_NOTIFY_CMD` | (unset) | `watch` notification command, run as `<cmd> "<title>" "<message>"` via the OS shell |
 | `CLAUDE_ORG_WATCH_MAX_SLEEP` | `18000` | Max seconds between `watch` re-checks (values < 60 also lower the 60s minimum — for tests) |
-| `CLAUDE_ORG_UPSTREAM` | `https://api.anthropic.com` | API base URL for `probe` and `proxy` (stub upstream in tests) |
+| `CLAUDE_ORG_UPSTREAM` | `https://api.anthropic.com` | API base URL for `probe` and `proxy` (stub upstream in tests). `proxy` refuses any other value unless `CLAUDE_ORG_UNSAFE_UPSTREAM=1`, since org tokens are sent there |
+| `CLAUDE_ORG_UNSAFE_UPSTREAM` | (unset) | `1` lets `proxy` forward to a `CLAUDE_ORG_UPSTREAM` other than `api.anthropic.com` (tests only) |
+| `CLAUDE_ORG_PROXY_SECRET` | (unset) | Standalone `node lib/proxy.js` only: the bearer value clients must send. `claude-org proxy` generates one per session itself |
 | `CLAUDE_ORG_PROXY` | `1` when launched via `proxy` | Marker env passed to the claude process so user hooks can detect connector-less sessions |
 | `CLAUDE_ORG_STATE_FILE` | set when launched via `proxy` | Path of the JSON file holding the org and model of the last request (read it from a statusline or hook) |
 | `CLAUDE_ORG_FORCE_PROBE` | (unset) | Test seam: `allowed` / `rejected[:<epoch>]` / `rejected_until:<epoch>` fakes `probe` results without API calls |
@@ -143,7 +177,7 @@ A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat t
 
 ## Notes
 
-- **Token safety**: tokens are read from files only and never printed to logs, errors, or test snapshots. The proxy binds to `127.0.0.1` only.
+- **Token safety**: tokens are read from files only and never printed to logs, errors, or test snapshots. A token file must be mode `0600` and owned by you (`chmod 600 ~/.claude/org-tokens/*.token`); one that other users can read is refused. Org names are limited to letters, digits, `_` and `-`. The proxy binds to `127.0.0.1` only and serves only the `claude` it launched (see [Unattended use](#unattended-use-supervisors---dangerously-skip-permissions)).
 - **probe cost**: each `probe` sends one `max_tokens=1` request (~11 tokens billed to that org), once per `auto` launch.
 - **Token expiry**: tokens last ~1 year. If `probe` returns `status=unknown` or `status` shows `(auth status failed)`, rerun `claude setup-token` and overwrite the file.
 
