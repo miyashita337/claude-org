@@ -211,6 +211,10 @@ test('H3: wrong Host, path outside /v1/, odd method -> refused, not forwarded', 
   assert.strictEqual((await rawRequest(p.port, { method: 'OPTIONS', body: null })).status, 405);
   assert.strictEqual(await upstreamHits(), before);
   assert.ok(p.logs.some(l => /refused POST \/admin: only \/v1\/\* is forwarded \(HTTP 404\)/.test(l)), p.logs.join(''));
+  // a refused request's query string never reaches the log (it may carry secrets)
+  assert.strictEqual((await rawRequest(p.port, { method: 'PUT', path: '/v1/messages?api_key=QUERYSECRET' })).status, 405);
+  assert.ok(p.logs.some(l => /refused PUT \/v1\/messages\?\.\.\.: /.test(l)), p.logs.join(''));
+  assert.ok(!p.logs.join('').includes('QUERYSECRET'), 'query value leaked into the proxy log');
   assert.strictEqual((await post(p.port)).status, 200);
   assert.strictEqual((await rawRequest(p.port, { path: '/v1/messages?beta=true&x=//' })).status, 200, 'query string must not be inspected');
 });

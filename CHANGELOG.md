@@ -8,6 +8,7 @@
   - the launcher forwards `SIGTERM` / `SIGHUP` (and `SIGINT` without a terminal) to `claude`, waits for it, and sends `SIGKILL` after 10 s, so killing the launcher pid no longer orphans `claude`; with a terminal, Ctrl-C no longer kills the proxy under a running `claude`
   - token files must be mode `0600` and owned by the user, org names are limited to `[A-Za-z0-9_-]`, and `CLAUDE_ORG_UPSTREAM` other than `https://api.anthropic.com` is refused unless `CLAUDE_ORG_UNSAFE_UPSTREAM=1`
   - a 401 from an org (expired token) fails over to the next org, and "no org works" events are logged on fixed-format `ALERT ...` lines a supervisor can grep (README, "Unattended use")
+  - the proxy log never records a request's query string (a refused `/v1/messages?...` is logged as such), so a secret put there cannot leak into the log
   - README: unattended runs must use proxy mode; how to keep the token dir away from `claude`'s shell and Read tool
 
 ## 0.3.0 — 2026-10-10
