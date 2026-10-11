@@ -33,11 +33,15 @@ test('P8: proxy subcommand wires env, serves, and cleans up', async () => {
       CLAUDE_ORG_TOKEN_DIR: dir,
       CLAUDE_ORG_PREFER: 'a',
       CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
+      CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
     });
     assert.match(r.stdout, /^args=--resume$/m);
     const m = r.stdout.match(/^base=http:\/\/127\.0\.0\.1:(\d+)$/m);
     assert.ok(m, `no base= line: ${r.stdout} ${r.stderr}`);
-    assert.match(r.stdout, /^auth=claude-org-proxy$/m);
+    // M3: the Bearer value is a per-session secret that only the child gets
+    const secret = r.stdout.match(/^auth=([0-9a-f]{64})$/m);
+    assert.ok(secret, `no per-session secret in auth=: ${r.stdout}`);
+    assert.doesNotMatch(r.stderr, new RegExp(secret[1]));
     assert.match(r.stdout, /^proxyflag=1$/m);
     assert.match(r.stdout, /^proxy_alive=200$/m, `proxy not reachable from claude: ${r.stdout}`);
     // P8.8/P8.9: proxy defaults restore subscription-equivalent cache TTL and
@@ -56,6 +60,7 @@ test('P8: proxy subcommand wires env, serves, and cleans up', async () => {
     const logText = fs.readFileSync(logf, 'utf8');
     assert.match(logText, /via a model=stub-model -> 200 /);
     assert.doesNotMatch(logText, /STUB-PROMPT|tok-a/);
+    assert.doesNotMatch(logText, new RegExp(secret[1]));
     // After exit, the proxy must be gone.
     await new Promise(r2 => setTimeout(r2, 500));
     await assert.rejects(
@@ -91,6 +96,7 @@ test('P11: user-set cache TTL / tool search env are preserved', async () => {
       PATH: stub + path.delimiter + process.env.PATH,
       CLAUDE_ORG_TOKEN_DIR: dir,
       CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
+      CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
       CLAUDE_CODE_PROMPT_CACHE_TTL: '5m',
       ENABLE_TOOL_SEARCH: 'false',
       CLAUDE_ORG_STRATEGY: 'least-utilized',
@@ -115,6 +121,7 @@ test('P10: missing claude -> non-zero exit, proxy cleaned up', async () => {
       PATH: emptyBin, // no claude on PATH
       CLAUDE_ORG_TOKEN_DIR: dir,
       CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
+      CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
     });
     assert.notStrictEqual(r.status, 0);
     const m = r.stderr.match(/proxy 127\.0\.0\.1:(\d+)/);
@@ -125,4 +132,97 @@ test('P10: missing claude -> non-zero exit, proxy cleaned up', async () => {
   } finally {
     upstream.close();
   }
+});
+
+// A claude that reports its pid and then waits, for the signal tests.
+const SLEEPING_CLAUDE_JS = `'use strict';
+console.log('pid=' + process.pid);
+setTimeout(() => {}, 60000);
+`;
+const POSIX = process.platform !== 'win32';
+
+// Start `proxy` with the sleeping claude; resolves once claude printed its pid.
+async function startSleepingProxy(t, upstream) {
+  const { spawnBin } = require('./helpers');
+  const stub = makeClaudeStub(path.join(tmpdir(), 'bin'), SLEEPING_CLAUDE_JS);
+  const run = spawnBin(['proxy'], {
+    PATH: stub + path.delimiter + process.env.PATH,
+    CLAUDE_ORG_TOKEN_DIR: makeTokenDir(TOKEN_SET),
+    CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
+    CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
+  });
+  t.after(() => { try { run.child.kill('SIGKILL'); } catch { /* exited */ } });
+  const deadline = Date.now() + 10000;
+  while (!/^pid=\d+$/m.test(run.stdout()) && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
+  const m = run.stdout().match(/^pid=(\d+)$/m);
+  assert.ok(m, `claude stub did not start: ${run.stdout()} ${run.stderr()}`);
+  return { run, claudePid: Number(m[1]) };
+}
+const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function waitGone(pid, ms = 5000) {
+  const deadline = Date.now() + ms;
+  while (alive(pid) && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
+  return !alive(pid);
+}
+
+// P31 / AC-2 (M2): SIGTERM to the launcher reaches claude; the launcher waits
+// for it and reports 128+15
+test('P31: SIGTERM to the launcher ends claude too', { skip: !POSIX }, async t => {
+  const upstream = await stubUpstream();
+  t.after(() => upstream.close());
+  const { run, claudePid } = await startSleepingProxy(t, upstream);
+  run.child.kill('SIGTERM');
+  const r = await run.result;
+  assert.ok(await waitGone(claudePid), `claude ${claudePid} still running after the launcher got SIGTERM`);
+  assert.strictEqual(r.status, 143, `launcher exit: ${r.status} ${r.signal} ${r.stderr}`);
+});
+
+// P32 (M2): without a terminal, SIGINT is forwarded as well (a supervisor's
+// interrupt); with one, claude already got it from the tty
+test('P32: SIGINT to a headless launcher is forwarded', { skip: !POSIX }, async t => {
+  const upstream = await stubUpstream();
+  t.after(() => upstream.close());
+  const { run, claudePid } = await startSleepingProxy(t, upstream);
+  run.child.kill('SIGINT');
+  const r = await run.result;
+  assert.ok(await waitGone(claudePid), `claude ${claudePid} still running`);
+  assert.strictEqual(r.status, 130);
+});
+
+// P33 (S1): a non-default upstream without the unsafe flag stops the launch
+// before claude starts (org tokens would be sent there)
+test('P33: unknown upstream without CLAUDE_ORG_UNSAFE_UPSTREAM -> exit 1, claude not launched', async t => {
+  const upstream = await stubUpstream();
+  t.after(() => upstream.close());
+  const stub = makeClaudeStub(path.join(tmpdir(), 'bin'));
+  const r = await runBinAsync(['proxy'], {
+    PATH: stub + path.delimiter + process.env.PATH,
+    CLAUDE_ORG_TOKEN_DIR: makeTokenDir(TOKEN_SET),
+    CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
+  });
+  assert.strictEqual(r.status, 1);
+  assert.strictEqual(r.stdout, '');
+  assert.match(r.stderr, /CLAUDE_ORG_UNSAFE_UPSTREAM=1/);
+});
+
+// P34 (S5): token files the proxy would refuse are reported at launch, and
+// the launch fails when fewer than 2 usable orgs remain
+test('P34: world-readable token files are reported at launch', { skip: !POSIX }, async t => {
+  const upstream = await stubUpstream();
+  t.after(() => upstream.close());
+  const stub = makeClaudeStub(path.join(tmpdir(), 'bin'));
+  const dir = makeTokenDir(TOKEN_SET);
+  fs.chmodSync(path.join(dir, 'a.token'), 0o644);
+  fs.chmodSync(path.join(dir, 'b.token'), 0o644);
+  const r = await runBinAsync(['proxy'], {
+    PATH: stub + path.delimiter + process.env.PATH,
+    CLAUDE_ORG_TOKEN_DIR: dir,
+    CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
+    CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
+  });
+  assert.strictEqual(r.status, 1, r.stderr);
+  assert.strictEqual(r.stdout, '', 'claude was launched');
+  assert.match(r.stderr, /skipping org a: token file .*a\.token is readable by other users \(mode 644\); run: chmod 600/);
+  assert.match(r.stderr, /skipping org b: /);
+  assert.match(r.stderr, /2 つ以上/);
 });
