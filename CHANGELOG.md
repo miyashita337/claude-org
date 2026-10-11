@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-10-11
+
 - `proxy`: hardened for unattended use under a supervisor (#22)
   - only the `claude` it launched can use it: a per-session secret is checked (constant time) on every request, `Host` must be `127.0.0.1:<port>`, only `GET` / `POST` / `DELETE` under `/v1/` are forwarded, and bodies over 64 MB get 413. Standalone `node lib/proxy.js` needs `CLAUDE_ORG_PROXY_SECRET`
   - it no longer crashes or hangs: an unreadable token dir gives 503, every request handler error is caught, hop-by-hop headers are dropped, an upstream that sends nothing for 10 min is given up and the next org tried, and a `claude` that cancels or exits mid-response cancels the upstream request
