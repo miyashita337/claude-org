@@ -257,3 +257,30 @@ test('guardLogStream mirrors ALERT lines to stderr after the log fails', () => {
     process.stderr.write = origWrite;
   }
 });
+
+// Issue #31 review: the write that first fails must not lose its ALERT line.
+// A real fs.WriteStream on a read-only fd fails asynchronously (EBADF), the
+// same shape as ENOSPC.
+test('guardLogStream recovers the ALERT line whose write failed on a real stream', async () => {
+  const { guardLogStream } = require('../lib/proxy');
+  const file = path.join(tmpdir(), 'proxy.log');
+  fs.writeFileSync(file, '');
+  const stream = fs.createWriteStream(file, { fd: fs.openSync(file, 'r'), autoClose: false });
+  const errs = [];
+  const origErr = console.error;
+  const origWrite = process.stderr.write;
+  console.error = m => errs.push(m);
+  process.stderr.write = l => { errs.push(l); return true; };
+  try {
+    const out = guardLogStream(stream, file);
+    out.write('ALERT token-rejected org=a\n');
+    await new Promise(r => setTimeout(r, 200));
+    out.write('ALERT no-org-available\n');
+    assert.strictEqual(errs.filter(e => /ALERT token-rejected/.test(e)).length, 1, 'first ALERT recovered once');
+    assert.strictEqual(errs.filter(e => /ALERT no-org-available/.test(e)).length, 1, 'later ALERT mirrored once');
+    assert.strictEqual(errs.filter(e => /cannot write the proxy log/.test(e)).length, 1);
+  } finally {
+    console.error = origErr;
+    process.stderr.write = origWrite;
+  }
+});
