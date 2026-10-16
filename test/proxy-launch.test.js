@@ -226,3 +226,61 @@ test('P34: world-readable token files are reported at launch', { skip: !POSIX },
   assert.match(r.stderr, /skipping org b: /);
   assert.match(r.stderr, /2 つ以上/);
 });
+
+// Issue #31: once the proxy log is unwritable, ALERT lines are mirrored to
+// stderr so an unattended session that only watches stderr still sees them.
+// (Deleting the log dir does not fail an already-open fd on POSIX, so the
+// failure is injected as a stream 'error' instead, as disk-full would.)
+test('guardLogStream mirrors ALERT lines to stderr after the log fails', () => {
+  const { EventEmitter } = require('events');
+  const { guardLogStream } = require('../lib/proxy');
+  const written = [];
+  const stream = Object.assign(new EventEmitter(), { write: l => written.push(l) });
+  const errs = [];
+  const origErr = console.error;
+  const origWrite = process.stderr.write;
+  console.error = m => errs.push(m);
+  process.stderr.write = l => { errs.push(l); return true; };
+  try {
+    const out = guardLogStream(stream, '/x/proxy.log');
+    out.write('ALERT before\n');
+    assert.deepStrictEqual(errs, [], 'no mirroring while the log works');
+    stream.emit('error', new Error('ENOSPC'));
+    out.write('plain line\n');
+    out.write('ALERT token-rejected org=a\n');
+    assert.strictEqual(errs.filter(e => /cannot write the proxy log/.test(e)).length, 1);
+    assert.strictEqual(errs.filter(e => /ALERT token-rejected/.test(e)).length, 1);
+    assert.ok(!errs.some(e => /plain line/.test(e)));
+    assert.strictEqual(written.length, 2, 'non-ALERT lines still go to the stream; mirrored ALERTs do not');
+  } finally {
+    console.error = origErr;
+    process.stderr.write = origWrite;
+  }
+});
+
+// Issue #31 review: the write that first fails must not lose its ALERT line.
+// A real fs.WriteStream on a read-only fd fails asynchronously (EBADF), the
+// same shape as ENOSPC.
+test('guardLogStream recovers the ALERT line whose write failed on a real stream', async () => {
+  const { guardLogStream } = require('../lib/proxy');
+  const file = path.join(tmpdir(), 'proxy.log');
+  fs.writeFileSync(file, '');
+  const stream = fs.createWriteStream(file, { fd: fs.openSync(file, 'r'), autoClose: false });
+  const errs = [];
+  const origErr = console.error;
+  const origWrite = process.stderr.write;
+  console.error = m => errs.push(m);
+  process.stderr.write = l => { errs.push(l); return true; };
+  try {
+    const out = guardLogStream(stream, file);
+    out.write('ALERT token-rejected org=a\n');
+    await new Promise(r => setTimeout(r, 200));
+    out.write('ALERT no-org-available\n');
+    assert.strictEqual(errs.filter(e => /ALERT token-rejected/.test(e)).length, 1, 'first ALERT recovered once');
+    assert.strictEqual(errs.filter(e => /ALERT no-org-available/.test(e)).length, 1, 'later ALERT mirrored once');
+    assert.strictEqual(errs.filter(e => /cannot write the proxy log/.test(e)).length, 1);
+  } finally {
+    console.error = origErr;
+    process.stderr.write = origWrite;
+  }
+});
