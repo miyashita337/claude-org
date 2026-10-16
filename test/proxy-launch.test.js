@@ -251,7 +251,7 @@ test('guardLogStream mirrors ALERT lines to stderr after the log fails', () => {
     assert.strictEqual(errs.filter(e => /cannot write the proxy log/.test(e)).length, 1);
     assert.strictEqual(errs.filter(e => /ALERT token-rejected/.test(e)).length, 1);
     assert.ok(!errs.some(e => /plain line/.test(e)));
-    assert.strictEqual(written.length, 3, 'log writes still attempted');
+    assert.strictEqual(written.length, 2, 'non-ALERT lines still go to the stream; mirrored ALERTs do not');
   } finally {
     console.error = origErr;
     process.stderr.write = origWrite;
