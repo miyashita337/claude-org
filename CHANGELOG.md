@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `proxy`: each launch keeps its log dir (`claude-org-proxy-*` in the temp dir) for later investigation, but now removes all but the newest 20 at startup, so repeated and headless launches no longer pile up (#15)
+
 ## 0.4.0 — 2026-10-11
 
 - `proxy`: hardened for unattended use under a supervisor (#22)
