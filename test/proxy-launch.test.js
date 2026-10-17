@@ -292,8 +292,9 @@ function seedRunDirs(root, names) {
     const d = path.join(root, name);
     fs.mkdirSync(d);
     fs.writeFileSync(path.join(d, 'proxy.log'), 'x');
-    // later index = newer
-    fs.utimesSync(d, now - 1000 + i, now - 1000 + i);
+    fs.writeFileSync(path.join(d, 'pid'), '2147483646');  // a dead launcher
+    // later index = newer launch (the pid file carries the launch time)
+    fs.utimesSync(path.join(d, 'pid'), now - 1000 + i, now - 1000 + i);
   });
 }
 
@@ -336,6 +337,84 @@ test('repeated proxy launches keep the run dir count bounded and the printed log
     assert.ok(fs.existsSync(logf), `printed log path missing: ${logf}`);
     const runDirs = fs.readdirSync(tmpRoot).filter(n => /^claude-org-proxy-/.test(n));
     assert.strictEqual(runDirs.length, 21, '20 kept + the new run');
+  } finally {
+    upstream.close();
+  }
+});
+
+test('pruneRunDirs never removes a dir whose launcher is alive, even over the limit', () => {
+  const { pruneRunDirs } = require('../lib/proxy');
+  const root = tmpdir();
+  seedRunDirs(root, ['claude-org-proxy-live01', 'claude-org-proxy-dead02', 'claude-org-proxy-dead03']);
+  fs.writeFileSync(path.join(root, 'claude-org-proxy-live01', 'pid'), String(process.pid));
+  fs.utimesSync(path.join(root, 'claude-org-proxy-live01', 'pid'), 1, 1);  // oldest launch
+  assert.strictEqual(pruneRunDirs(root, 0), 2);
+  assert.deepStrictEqual(fs.readdirSync(root), ['claude-org-proxy-live01']);
+});
+
+test('pruneRunDirs orders by launch time, not by dir mtime', () => {
+  const { pruneRunDirs } = require('../lib/proxy');
+  const root = tmpdir();
+  seedRunDirs(root, ['claude-org-proxy-aaa001', 'claude-org-proxy-bbb002']);
+  // the older launch had its state.json renamed in last: dir mtime is newest
+  const t = Date.now() / 1000;
+  fs.utimesSync(path.join(root, 'claude-org-proxy-aaa001'), t, t);
+  assert.strictEqual(pruneRunDirs(root, 1), 1);
+  assert.deepStrictEqual(fs.readdirSync(root), ['claude-org-proxy-bbb002']);
+});
+
+test('pruneRunDirs skips dirs owned by someone else and symlinks', { skip: typeof process.getuid !== 'function' }, () => {
+  const { pruneRunDirs } = require('../lib/proxy');
+  const root = tmpdir();
+  seedRunDirs(root, ['claude-org-proxy-mine01']);
+  const target = path.join(root, 'victim');
+  fs.mkdirSync(target);
+  fs.symlinkSync(target, path.join(root, 'claude-org-proxy-link01'));
+  const realGetuid = process.getuid;
+  process.getuid = () => realGetuid.call(process) + 1;  // every dir now looks foreign
+  try { assert.strictEqual(pruneRunDirs(root, 0), 0); } finally { process.getuid = realGetuid; }
+  assert.ok(fs.existsSync(path.join(root, 'claude-org-proxy-mine01')));
+  assert.strictEqual(pruneRunDirs(root, 0), 1, 'own dir is removed');
+  assert.ok(fs.existsSync(target), 'symlink target untouched');
+});
+
+test('pruneRunDirs reports a dir it cannot remove', () => {
+  const { pruneRunDirs } = require('../lib/proxy');
+  const root = tmpdir();
+  seedRunDirs(root, ['claude-org-proxy-stuck1']);
+  const origRm = fs.rmSync;
+  const errs = [];
+  const origErr = console.error;
+  fs.rmSync = () => { throw new Error('EACCES'); };
+  console.error = m => errs.push(m);
+  try { assert.strictEqual(pruneRunDirs(root, 0), 0); } finally { fs.rmSync = origRm; console.error = origErr; }
+  assert.strictEqual(errs.length, 1);
+  assert.match(errs[0], /cannot remove old proxy log dir .*stuck1.*EACCES/);
+});
+
+test('repeated launches stay bounded and each launch keeps its log and pid file', async () => {
+  const upstream = await stubUpstream();
+  const stub = makeClaudeStub(path.join(tmpdir(), 'bin'));
+  const dir = makeTokenDir(TOKEN_SET);
+  const tmpRoot = tmpdir();
+  const env = {
+    PATH: stub + path.delimiter + process.env.PATH,
+    TMPDIR: tmpRoot, TEMP: tmpRoot, TMP: tmpRoot,
+    CLAUDE_ORG_TOKEN_DIR: dir,
+    CLAUDE_ORG_PREFER: 'a',
+    CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
+    CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
+  };
+  try {
+    const logs = [];
+    for (let i = 0; i < 23; i++) {
+      const r = await runBinAsync(['proxy'], env);
+      logs.push(r.stderr.match(/log: (.+)\)$/m)[1]);
+    }
+    const runDirs = fs.readdirSync(tmpRoot).filter(n => /^claude-org-proxy-/.test(n));
+    assert.strictEqual(runDirs.length, 21, '20 kept at the last start + the last run');
+    assert.ok(fs.existsSync(logs[logs.length - 1]), 'latest log path exists');
+    assert.ok(!fs.existsSync(logs[0]), 'oldest was pruned');
   } finally {
     upstream.close();
   }
