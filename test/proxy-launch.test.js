@@ -284,3 +284,59 @@ test('guardLogStream recovers the ALERT line whose write failed on a real stream
     process.stderr.write = origWrite;
   }
 });
+
+// Issue #15: launches must not leave claude-org-proxy-* dirs behind forever.
+function seedRunDirs(root, names) {
+  const now = Date.now() / 1000;
+  names.forEach((name, i) => {
+    const d = path.join(root, name);
+    fs.mkdirSync(d);
+    fs.writeFileSync(path.join(d, 'proxy.log'), 'x');
+    // later index = newer
+    fs.utimesSync(d, now - 1000 + i, now - 1000 + i);
+  });
+}
+
+test('pruneRunDirs keeps the newest N matching dirs and touches nothing else', () => {
+  const { pruneRunDirs } = require('../lib/proxy');
+  const root = tmpdir();
+  const names = Array.from({ length: 6 }, (_, i) => `claude-org-proxy-abc12${i}`);
+  seedRunDirs(root, names);
+  fs.mkdirSync(path.join(root, 'claude-org-proxy-toolong1'));   // not the mkdtemp shape
+  fs.mkdirSync(path.join(root, 'other-dir'));
+  fs.writeFileSync(path.join(root, 'claude-org-proxy-file12'), '');  // a file, not a dir
+  const removed = pruneRunDirs(root, 3);
+  assert.strictEqual(removed, 3);
+  const left = fs.readdirSync(root).sort();
+  assert.deepStrictEqual(left.filter(n => /^claude-org-proxy-abc12/.test(n)), names.slice(3), 'newest 3 kept');
+  assert.ok(left.includes('claude-org-proxy-toolong1') && left.includes('other-dir') && left.includes('claude-org-proxy-file12'));
+});
+
+test('pruneRunDirs on a missing root is a no-op', () => {
+  const { pruneRunDirs } = require('../lib/proxy');
+  assert.strictEqual(pruneRunDirs(path.join(tmpdir(), 'nope')), 0);
+});
+
+test('repeated proxy launches keep the run dir count bounded and the printed log path exists', async () => {
+  const upstream = await stubUpstream();
+  const stub = makeClaudeStub(path.join(tmpdir(), 'bin'));
+  const dir = makeTokenDir(TOKEN_SET);
+  const tmpRoot = tmpdir();
+  seedRunDirs(tmpRoot, Array.from({ length: 25 }, (_, i) => `claude-org-proxy-old${String(i).padStart(3, '0')}`));
+  try {
+    const r = await runBinAsync(['proxy'], {
+      PATH: stub + path.delimiter + process.env.PATH,
+      TMPDIR: tmpRoot, TEMP: tmpRoot, TMP: tmpRoot,
+      CLAUDE_ORG_TOKEN_DIR: dir,
+      CLAUDE_ORG_PREFER: 'a',
+      CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
+      CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
+    });
+    const logf = r.stderr.match(/log: (.+)\)$/m)[1];
+    assert.ok(fs.existsSync(logf), `printed log path missing: ${logf}`);
+    const runDirs = fs.readdirSync(tmpRoot).filter(n => /^claude-org-proxy-/.test(n));
+    assert.strictEqual(runDirs.length, 21, '20 kept + the new run');
+  } finally {
+    upstream.close();
+  }
+});
