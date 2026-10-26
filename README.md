@@ -110,9 +110,17 @@ Claude Code loads claude.ai connector MCPs (Gmail / Drive / Calendar / Notion / 
 - `CLAUDE_ORG_NO_CONNECTORS=1` forces the earlier way. The session gets `CLAUDE_ORG_CONNECTORS=1` or `0` so hooks can tell which one it is.
 - Claude Code may also send custom headers to other Anthropic endpoints. The secret is accepted only by this session's loopback proxy and is worthless once it exits.
 
+**Claude in Chrome (browser automation)**
+
+Claude in Chrome (`claude --chrome`, the `mcp__claude-in-chrome__*` tools) passes the same check as connectors: Claude Code does not start it while `ANTHROPIC_AUTH_TOKEN` takes precedence, and it also needs an OAuth token with a scope the Chrome extension accepts, which a claude.ai login has (measured with Claude Code 2.1.310). So it works in proxy sessions that kept the claude.ai login (launch line `claude.ai connectors: on`), and not otherwise:
+
+- It drives the Chrome extension paired with your **claude.ai login** (the default org), while model requests go to whichever org the proxy picks. Page content the browser reads is processed under that org's token.
+- It can pick a Chrome on another machine signed in to the same claude.ai account. Check `onThisComputer` in `list_connected_browsers` before driving a browser.
+- To re-check after a Claude Code update: `claude-org proxy -p "reply ok" --chrome --debug-file dbg.log`, then look for `In-process Chrome MCP server started` in `dbg.log`.
+
 **Limitations of proxy mode**
 
-- Without a claude.ai login (see above), claude.ai connector MCPs and Remote Control are **unavailable**. Local/plugin MCPs work either way. Open connectors in a plain `claude --resume` session — history is shared.
+- Without a claude.ai login (see above), claude.ai connector MCPs, Claude in Chrome and Remote Control are **unavailable**. Local/plugin MCPs work either way. Open connectors in a plain `claude --resume` session — history is shared.
 - Each proxy serves one session and dies when `claude` exits.
 
 **Subagents**
@@ -132,11 +140,11 @@ A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (the mode without a claud
 
 `claude-org proxy` restores the subscription-equivalent behavior by launching `claude` with `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` and `ENABLE_TOOL_SEARCH=true` (in both modes). If you have set either variable yourself, your value wins.
 
-| Entry point | Mid-session switch | Connector MCPs | Best for |
-|---|---|---|---|
-| `claude` | no (default org) | yes | connector work |
-| `claude-org auto --resume` | at launch only | no on preferred org / yes on default | short tasks |
-| `claude-org proxy --resume` | **automatic** | yes with a claude.ai login (those of the login) / no otherwise | long-running work, agents, unattended runs |
+| Entry point | Mid-session switch | Connector MCPs | Claude in Chrome | Best for |
+|---|---|---|---|---|
+| `claude` | no (default org) | yes | yes | connector work |
+| `claude-org auto --resume` | at launch only | no on preferred org / yes on default | no on preferred org / yes on default (expected; a `claude setup-token` token lacks the scope the extension accepts) | short tasks |
+| `claude-org proxy --resume` | **automatic** | yes with a claude.ai login (those of the login) / no otherwise | yes with a claude.ai login / no otherwise | long-running work, agents, unattended runs |
 
 ### Unattended use (supervisors, `--dangerously-skip-permissions`)
 
@@ -183,9 +191,9 @@ When a supervisor starts `claude` without a person watching (e.g. `claude -p` wi
 | `CLAUDE_ORG_UPSTREAM` | `https://api.anthropic.com` | API base URL for `probe` and `proxy` (stub upstream in tests). `proxy` refuses any other value unless `CLAUDE_ORG_UNSAFE_UPSTREAM=1`, since org tokens are sent there |
 | `CLAUDE_ORG_UNSAFE_UPSTREAM` | (unset) | `1` lets `proxy` forward to a `CLAUDE_ORG_UPSTREAM` other than `api.anthropic.com` (tests only) |
 | `CLAUDE_ORG_PROXY_SECRET` | (unset) | Standalone `node lib/proxy.js` only: the value clients must send (as `x-claude-org-secret` header or bearer token). `claude-org proxy` generates one per session itself |
-| `CLAUDE_ORG_NO_CONNECTORS` | (unset) | `1`: `proxy` always passes the secret as `ANTHROPIC_AUTH_TOKEN` (no claude.ai login check, no connector MCPs) |
+| `CLAUDE_ORG_NO_CONNECTORS` | (unset) | `1`: `proxy` always passes the secret as `ANTHROPIC_AUTH_TOKEN` (no claude.ai login check, no connector MCPs, no Claude in Chrome) |
 | `CLAUDE_ORG_PROXY` | `1` when launched via `proxy` | Marker env passed to the claude process so user hooks can detect proxy sessions |
-| `CLAUDE_ORG_CONNECTORS` | `1` / `0` when launched via `proxy` | Marker env: `1` when the session kept its claude.ai login (connector MCPs can load), `0` otherwise |
+| `CLAUDE_ORG_CONNECTORS` | `1` / `0` when launched via `proxy` | Marker env: `1` when the session kept its claude.ai login (connector MCPs and Claude in Chrome can load), `0` otherwise |
 | `CLAUDE_ORG_STATE_FILE` | set when launched via `proxy` | Path of the JSON file holding the org and model of the last request (read it from a statusline or hook) |
 | `CLAUDE_ORG_FORCE_PROBE` | (unset) | Test seam: `allowed` / `rejected[:<epoch>]` / `rejected_until:<epoch>` fakes `probe` results without API calls |
 | `CLAUDE_ORG_REJECT_FILE` | (unset) | Test seam: orgs listed comma-separated in this file are treated as rate-limited by `proxy` |
