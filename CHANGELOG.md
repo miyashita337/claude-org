@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- docs: Claude in Chrome (`--chrome`, browser automation) also works in proxy sessions that kept the claude.ai login, since 0.5.0: Claude Code gates it on the same auth check as connector MCPs. README now says so, notes that it drives the extension of the claude.ai login while model requests go to the proxy's org, and that it is off with `CLAUDE_ORG_NO_CONNECTORS=1` (#41)
+
 ## 0.5.0 — 2026-10-27
 
 - `proxy`: claude.ai connector MCPs (Slack / Notion / Gmail …) now work in proxy sessions when you are signed in to claude.ai. The launch checks `claude auth status`; with a claude.ai login, `claude` keeps it and sends the per-session secret in an `x-claude-org-secret` header (`ANTHROPIC_CUSTOM_HEADERS`, your own lines kept) instead of `ANTHROPIC_AUTH_TOKEN`. The proxy discards the login token and the header and still sends only org tokens upstream. Without a login (or with `CLAUDE_ORG_NO_CONNECTORS=1`) the session starts as before. The launch line `-> claude.ai connectors: on/off (...)` and the `CLAUDE_ORG_CONNECTORS=1/0` env say which mode is in use (#35)
