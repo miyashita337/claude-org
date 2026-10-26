@@ -62,9 +62,20 @@ async function main() {
   }
 }
 
+// Exit by letting the event loop drain instead of process.exit(): on Windows
+// (Node 24.10), process.exit() after two or more fetch() calls aborts with the
+// libuv assertion "!(handle->flags & UV_HANDLE_CLOSING)" in src\win\async.c
+// and exit code 127 instead of ours (#36). If something still holds the loop
+// open, the unref'd timer exits the old way so the CLI never hangs.
+const EXIT_GRACE_MS = 5000;
+function finish(code) {
+  process.exitCode = code;
+  setTimeout(() => process.exit(code), EXIT_GRACE_MS).unref();
+}
+
 main()
-  .then(code => process.exit(code))
+  .then(code => finish(code))
   .catch(e => {
     console.error(`claude-org: ${e.message}`);
-    process.exit(1);
+    finish(1);
   });
