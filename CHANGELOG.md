@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `proxy`: claude.ai connector MCPs (Slack / Notion / Gmail …) now work in proxy sessions when you are signed in to claude.ai. The launch checks `claude auth status`; with a claude.ai login, `claude` keeps it and sends the per-session secret in an `x-claude-org-secret` header (`ANTHROPIC_CUSTOM_HEADERS`, your own lines kept) instead of `ANTHROPIC_AUTH_TOKEN`. The proxy discards the login token and the header and still sends only org tokens upstream. Without a login (or with `CLAUDE_ORG_NO_CONNECTORS=1`) the session starts as before. The launch line `-> claude.ai connectors: on/off (...)` and the `CLAUDE_ORG_CONNECTORS=1/0` env say which mode is in use (#35)
+
 - `proxy`: each launch keeps its log dir (`claude-org-proxy-*` in the temp dir) for later investigation, but now removes all but the newest 20 at startup, so repeated and headless launches no longer pile up (#15)
 
 ## 0.4.0 — 2026-10-11

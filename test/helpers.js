@@ -23,7 +23,21 @@ function makeTokenDir(files) {
 }
 
 // What claude sends for ANTHROPIC_AUTH_TOKEN: Authorization: Bearer <value>.
+// With ANTHROPIC_CUSTOM_HEADERS (no AUTH_TOKEN) it sends those headers and its
+// claude.ai login token as Bearer, like the real claude.
+// `claude auth status` prints FAKE_CLAUDE_AUTH_STATUS when set (otherwise it
+// falls through to the lines below, which are not JSON: "no claude.ai login"),
+// and appends the ANTHROPIC_AUTH_TOKEN it saw to FAKE_CLAUDE_AUTH_LOG.
 const CLAUDE_STUB_JS = `'use strict';
+if (process.argv[2] === 'auth' && process.argv[3] === 'status') {
+  if (process.env.FAKE_CLAUDE_AUTH_LOG) {
+    require('fs').appendFileSync(process.env.FAKE_CLAUDE_AUTH_LOG, 'auth_status_env_auth=' + (process.env.ANTHROPIC_AUTH_TOKEN || '<unset>') + '\\n');
+  }
+  if (process.env.FAKE_CLAUDE_AUTH_STATUS) {
+    console.log(process.env.FAKE_CLAUDE_AUTH_STATUS);
+    process.exit(0);
+  }
+}
 const argline = 'args=' + process.argv.slice(2).join(' ');
 console.log(argline);
 console.log('token=' + (process.env.CLAUDE_CODE_OAUTH_TOKEN || '<unset>'));
@@ -32,8 +46,16 @@ console.log('auth=' + (process.env.ANTHROPIC_AUTH_TOKEN || '<unset>'));
 console.log('proxyflag=' + (process.env.CLAUDE_ORG_PROXY || '<unset>'));
 console.log('ttl=' + (process.env.CLAUDE_CODE_PROMPT_CACHE_TTL || '<unset>'));
 console.log('toolsearch=' + (process.env.ENABLE_TOOL_SEARCH || '<unset>'));
+console.log('connectors=' + (process.env.CLAUDE_ORG_CONNECTORS || '<unset>'));
+console.log('customheaders=' + JSON.stringify(process.env.ANTHROPIC_CUSTOM_HEADERS || '<unset>'));
 const base = process.env.ANTHROPIC_BASE_URL;
-const headers = { authorization: 'Bearer ' + process.env.ANTHROPIC_AUTH_TOKEN };
+const headers = { authorization: 'Bearer ' + (process.env.ANTHROPIC_AUTH_TOKEN || 'CLAUDE-AI-LOGIN-TOKEN') };
+if (!process.env.ANTHROPIC_AUTH_TOKEN) {
+  for (const line of (process.env.ANTHROPIC_CUSTOM_HEADERS || '').split('\\n')) {
+    const i = line.indexOf(':');
+    if (i > 0) headers[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+}
 if (base) {
   (async () => {
     try {

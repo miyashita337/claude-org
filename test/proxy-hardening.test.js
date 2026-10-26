@@ -194,6 +194,42 @@ test('H2: missing or wrong secret -> 401, not forwarded', async t => {
   assert.strictEqual((await post(p.port)).status, 200);
 });
 
+// #35: the secret in x-claude-org-secret (claude keeps its claude.ai login and
+// sends that token as Bearer). The login token and the secret header never
+// reach the upstream; the org token replaces the Bearer as before.
+test('H2b: secret in x-claude-org-secret -> forwarded with the org token, login token and header dropped', async t => {
+  const p = await startProxy(t, { order: ['a'] });
+  const r = await rawRequest(p.port, { headers: {
+    authorization: 'Bearer CLAUDE-AI-LOGIN-TOKEN',
+    'x-claude-org-secret': SECRET,
+    'content-type': 'application/json',
+    'anthropic-beta': 'oauth-2025-04-20',
+  } });
+  assert.strictEqual(r.status, 200, r.body);
+  assert.strictEqual(r.headers['x-served-token'], 'tok-a');
+  assert.strictEqual(r.headers['x-claude-org'], 'a');
+  const seen = r.headers['x-seen-headers'].split(',');
+  assert.ok(!seen.includes('x-claude-org-secret'), `secret header reached the upstream: ${seen}`);
+  assert.ok(seen.includes('anthropic-beta'), `end-to-end header lost: ${seen}`);
+  const st = await upstreamState();
+  assert.strictEqual(st.hits['CLAUDE-AI-LOGIN-TOKEN'], undefined, 'claude.ai login token reached the upstream');
+  assert.ok(!p.logs.some(l => /CLAUDE-AI-LOGIN-TOKEN|test-secret/.test(l)), p.logs.join(''));
+});
+
+// #35: when the header is present it alone decides, so a wrong header is
+// refused even with the right Bearer, and nothing is forwarded
+test('H2c: wrong x-claude-org-secret -> 401 even with the right Bearer', async t => {
+  const p = await startProxy(t, { order: ['a'] });
+  const before = await upstreamHits();
+  for (const secretHeader of ['wrong', `${SECRET}x`, '']) {
+    const r = await rawRequest(p.port, { headers: { authorization: `Bearer ${SECRET}`, 'x-claude-org-secret': secretHeader } });
+    assert.strictEqual(r.status, 401, JSON.stringify(secretHeader));
+  }
+  const r = await rawRequest(p.port, { headers: { authorization: 'Bearer CLAUDE-AI-LOGIN-TOKEN' } });
+  assert.strictEqual(r.status, 401, 'login token alone must not pass');
+  assert.strictEqual(await upstreamHits(), before, 'a request with a wrong secret reached the upstream');
+});
+
 // M3: Host must name this proxy (DNS rebinding), only GET/POST/DELETE under
 // /v1/ are forwarded
 test('H3: wrong Host, path outside /v1/, odd method -> refused, not forwarded', async t => {

@@ -43,6 +43,9 @@ test('P8: proxy subcommand wires env, serves, and cleans up', async () => {
     assert.ok(secret, `no per-session secret in auth=: ${r.stdout}`);
     assert.doesNotMatch(r.stderr, new RegExp(secret[1]));
     assert.match(r.stdout, /^proxyflag=1$/m);
+    // #35: the stub reports no claude.ai login, so the Bearer mode is kept
+    assert.match(r.stdout, /^connectors=0$/m);
+    assert.match(r.stderr, /^-> claude\.ai connectors: off \(claude auth status gave no JSON\)$/m);
     assert.match(r.stdout, /^proxy_alive=200$/m, `proxy not reachable from claude: ${r.stdout}`);
     // P8.8/P8.9: proxy defaults restore subscription-equivalent cache TTL and
     // tool search (the harness env is stripped by the test helper, so these
@@ -106,6 +109,172 @@ test('P11: user-set cache TTL / tool search env are preserved', async () => {
     assert.match(r.stdout, /^toolsearch=false$/m, `user env overwritten: ${r.stdout}`);
   } finally {
     upstream.close();
+  }
+});
+
+// #35: an upstream that records the Authorization and header names of every
+// request, to check what leaves the proxy.
+function recordingUpstream() {
+  const seen = [];
+  return new Promise(resolve => {
+    const server = http.createServer((req, res) => {
+      seen.push({ url: req.url, auth: req.headers.authorization, headers: req.headers });
+      res.writeHead(200, { 'anthropic-ratelimit-unified-5h-status': 'allowed' });
+      res.end('{}');
+    });
+    server.listen(0, '127.0.0.1', () => resolve({ server, seen }));
+  });
+}
+const LOGGED_IN = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' });
+
+// C1: with a claude.ai login, claude keeps it (no ANTHROPIC_AUTH_TOKEN) and
+// sends the secret in a custom header; everything else of P8 still holds.
+test('C1: claude.ai login -> connectors mode, secret in a header, same proxy behavior', async () => {
+  const up = await recordingUpstream();
+  const stub = makeClaudeStub(path.join(tmpdir(), 'bin'));
+  const dir = makeTokenDir(TOKEN_SET);
+  try {
+    const r = await runBinAsync(['proxy', '--resume'], {
+      PATH: stub + path.delimiter + process.env.PATH,
+      CLAUDE_ORG_TOKEN_DIR: dir,
+      CLAUDE_ORG_PREFER: 'a',
+      CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${up.server.address().port}`,
+      CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
+      FAKE_CLAUDE_AUTH_STATUS: LOGGED_IN,
+    });
+    assert.match(r.stdout, /^args=--resume$/m);
+    assert.match(r.stdout, /^auth=<unset>$/m, `ANTHROPIC_AUTH_TOKEN must not be set: ${r.stdout}`);
+    assert.match(r.stdout, /^connectors=1$/m);
+    assert.match(r.stdout, /^proxyflag=1$/m);
+    assert.match(r.stdout, /^ttl=1h$/m);
+    assert.match(r.stdout, /^toolsearch=true$/m);
+    assert.match(r.stdout, /^base=http:\/\/127\.0\.0\.1:\d+$/m);
+    const ch = JSON.parse(r.stdout.match(/^customheaders=(.*)$/m)[1]);
+    const secret = ch.match(/^x-claude-org-secret: ([0-9a-f]{64})$/m);
+    assert.ok(secret, `no per-session secret header: ${ch}`);
+    assert.doesNotMatch(r.stderr, new RegExp(secret[1]));
+    assert.match(r.stderr, /^-> claude\.ai connectors: on \(claude\.ai login kept\)$/m);
+    assert.match(r.stdout, /^proxy_alive=200$/m, `proxy not reachable from claude: ${r.stdout}`);
+    const state = JSON.parse(r.stdout.match(/^state=(.*)$/m)[1]);
+    assert.deepStrictEqual([state.org, state.model], ['a', 'stub-model']);
+    // the upstream only ever saw the org token: never the login token or the secret
+    assert.ok(up.seen.length >= 2, `upstream saw ${up.seen.length} requests`);
+    for (const s of up.seen) {
+      assert.strictEqual(s.auth, 'Bearer tok-a', s.url);
+      assert.strictEqual(s.headers['x-claude-org-secret'], undefined, s.url);
+    }
+    const logText = fs.readFileSync(r.stderr.match(/log: (.+)\)$/m)[1], 'utf8');
+    assert.match(logText, /via a model=stub-model -> 200 /);
+    assert.match(logText, /claude\.ai connectors: on/);
+    assert.doesNotMatch(logText, new RegExp(`${secret[1]}|CLAUDE-AI-LOGIN-TOKEN|STUB-PROMPT|tok-a`));
+  } finally {
+    up.server.close();
+  }
+});
+
+// C2: the user's own custom headers survive; a secret header and an
+// ANTHROPIC_AUTH_TOKEN inherited from an outer claude-org proxy session are
+// neither used for the login check nor passed on.
+test('C2: user custom headers kept, inherited secret and auth token dropped', async () => {
+  const up = await recordingUpstream();
+  const stub = makeClaudeStub(path.join(tmpdir(), 'bin'));
+  const dir = makeTokenDir(TOKEN_SET);
+  const authLog = path.join(tmpdir(), 'auth.log');
+  try {
+    const r = await runBinAsync(['proxy'], {
+      PATH: stub + path.delimiter + process.env.PATH,
+      CLAUDE_ORG_TOKEN_DIR: dir,
+      CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${up.server.address().port}`,
+      CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
+      FAKE_CLAUDE_AUTH_STATUS: LOGGED_IN,
+      FAKE_CLAUDE_AUTH_LOG: authLog,
+      ANTHROPIC_AUTH_TOKEN: 'outer-session-secret',
+      ANTHROPIC_CUSTOM_HEADERS: 'X-Team: blue\nx-claude-org-secret: stale-outer-secret',
+    });
+    assert.match(fs.readFileSync(authLog, 'utf8'), /^auth_status_env_auth=<unset>$/m);
+    assert.match(r.stdout, /^auth=<unset>$/m);
+    const ch = JSON.parse(r.stdout.match(/^customheaders=(.*)$/m)[1]);
+    assert.match(ch, /^X-Team: blue$/m);
+    assert.doesNotMatch(ch, /stale-outer-secret/);
+    assert.strictEqual(ch.match(/x-claude-org-secret/g).length, 1, ch);
+    assert.match(r.stdout, /^proxy_alive=200$/m, r.stdout + r.stderr);
+    assert.ok(up.seen.every(s => s.headers['x-team'] === 'blue'), 'user header lost');
+  } finally {
+    up.server.close();
+  }
+});
+
+// C3: CLAUDE_ORG_NO_CONNECTORS=1 keeps the Bearer mode without asking claude
+test('C3: CLAUDE_ORG_NO_CONNECTORS=1 -> Bearer mode, no login check', async () => {
+  const up = await recordingUpstream();
+  const stub = makeClaudeStub(path.join(tmpdir(), 'bin'));
+  const dir = makeTokenDir(TOKEN_SET);
+  const authLog = path.join(tmpdir(), 'auth.log');
+  try {
+    const r = await runBinAsync(['proxy'], {
+      PATH: stub + path.delimiter + process.env.PATH,
+      CLAUDE_ORG_TOKEN_DIR: dir,
+      CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${up.server.address().port}`,
+      CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
+      CLAUDE_ORG_NO_CONNECTORS: '1',
+      FAKE_CLAUDE_AUTH_STATUS: LOGGED_IN,
+      FAKE_CLAUDE_AUTH_LOG: authLog,
+    });
+    assert.ok(!fs.existsSync(authLog), 'claude auth status was run');
+    assert.match(r.stdout, /^auth=[0-9a-f]{64}$/m);
+    assert.match(r.stdout, /^connectors=0$/m);
+    assert.match(r.stderr, /^-> claude\.ai connectors: off \(CLAUDE_ORG_NO_CONNECTORS=1\)$/m);
+    assert.match(r.stdout, /^proxy_alive=200$/m);
+  } finally {
+    up.server.close();
+  }
+});
+
+// C4: a login that is not claude.ai (a token or API key in the env) keeps the
+// Bearer mode: switching would hand claude no credential the proxy accepts.
+test('C4: non-claude.ai auth -> Bearer mode', async () => {
+  const up = await recordingUpstream();
+  const stub = makeClaudeStub(path.join(tmpdir(), 'bin'));
+  const dir = makeTokenDir(TOKEN_SET);
+  try {
+    const r = await runBinAsync(['proxy'], {
+      PATH: stub + path.delimiter + process.env.PATH,
+      CLAUDE_ORG_TOKEN_DIR: dir,
+      CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${up.server.address().port}`,
+      CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
+      FAKE_CLAUDE_AUTH_STATUS: JSON.stringify({ loggedIn: true, authMethod: 'oauth_token' }),
+    });
+    assert.match(r.stdout, /^auth=[0-9a-f]{64}$/m);
+    assert.match(r.stdout, /^connectors=0$/m);
+    assert.match(r.stderr, /connectors: off \(claude auth status: loggedIn=true authMethod=oauth_token\)/);
+    assert.match(r.stdout, /^proxy_alive=200$/m);
+  } finally {
+    up.server.close();
+  }
+});
+
+test('withSecretHeader keeps other lines and replaces any inherited secret line', () => {
+  const { withSecretHeader } = require('../lib/proxy');
+  assert.strictEqual(withSecretHeader(undefined, 's'), 'x-claude-org-secret: s');
+  assert.strictEqual(withSecretHeader('', 's'), 'x-claude-org-secret: s');
+  assert.strictEqual(
+    withSecretHeader('X-Team: blue\r\nX-Claude-Org-Secret:old\n  x-claude-org-secret  : older\nX-Url: http://a:1\n\n', 's'),
+    'X-Team: blue\nX-Url: http://a:1\nx-claude-org-secret: s',
+  );
+  // a line without a colon is the user's business and is kept
+  assert.strictEqual(withSecretHeader('odd-line', 's'), 'odd-line\nx-claude-org-secret: s');
+});
+
+test('childEnv removes keys set to undefined (case-insensitively on Windows)', () => {
+  const { childEnv } = require('../lib/launch');
+  const name = process.platform === 'win32' ? 'Claude_Org_Test_Unset' : 'CLAUDE_ORG_TEST_UNSET';
+  process.env[name] = 'x';
+  try {
+    const env = childEnv({ CLAUDE_ORG_TEST_UNSET: undefined, CLAUDE_ORG_TEST_SET: 'y' });
+    assert.ok(!Object.keys(env).some(k => k.toUpperCase() === 'CLAUDE_ORG_TEST_UNSET'), 'key not removed');
+    assert.strictEqual(env.CLAUDE_ORG_TEST_SET, 'y');
+  } finally {
+    delete process.env[name];
   }
 });
 

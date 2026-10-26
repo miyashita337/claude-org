@@ -82,9 +82,13 @@ claude-org proxy --resume
 ```
 
 1. A session-scoped proxy starts on `127.0.0.1:<random port>` (one per session; no port collisions).
-2. `claude` launches with `ANTHROPIC_BASE_URL` pointing at the proxy and a **per-session secret** as its bearer token (`ANTHROPIC_AUTH_TOKEN`, generated with `crypto.randomBytes`; it exists only in that `claude`'s environment).
+2. `claude` launches with `ANTHROPIC_BASE_URL` pointing at the proxy and a **per-session secret** (generated with `crypto.randomBytes`; it exists only in that `claude`'s environment). How the secret is passed depends on your login (see [claude.ai connectors](#claudeai-connectors-slack--notion-) below):
+   - you are signed in to claude.ai (`claude auth status` shows `"authMethod": "claude.ai"`): in an `x-claude-org-secret` header via `ANTHROPIC_CUSTOM_HEADERS`, and `claude` keeps its claude.ai login, so connector MCPs load. Your other `ANTHROPIC_CUSTOM_HEADERS` lines are kept;
+   - otherwise (no login, an API key or token in your env, or `CLAUDE_ORG_NO_CONNECTORS=1`): as its bearer token (`ANTHROPIC_AUTH_TOKEN`), as in earlier versions.
+
+   The launch prints which one was used: `-> claude.ai connectors: on (...)` / `off (<reason>)`.
 3. The proxy serves only requests that carry that secret, name it in `Host` (`127.0.0.1:<port>`, so a web page cannot reach it by DNS rebinding) and are `GET` / `POST` / `DELETE` under `/v1/`; anything else is refused with 401 / 403 / 404 / 405 and never forwarded. Request bodies over 64 MB get 413.
-4. The proxy replaces the `Authorization` header with a real org token, drops hop-by-hop headers, and forwards to `api.anthropic.com` (any other upstream is refused unless `CLAUDE_ORG_UNSAFE_UPSTREAM=1`). On a 429 or `anthropic-ratelimit-unified-5h-status: rejected` it marks that org limited until `5h-reset` and **resends the same request** with the next org's token. An org whose token is rejected (401: expired or revoked) is skipped the same way for 10 minutes.
+4. The proxy replaces the `Authorization` header with a real org token (when `claude` keeps its claude.ai login, that login token arrives as `Authorization` and is discarded, never forwarded or logged), drops the `x-claude-org-secret` header and hop-by-hop headers, and forwards to `api.anthropic.com` (any other upstream is refused unless `CLAUDE_ORG_UNSAFE_UPSTREAM=1`). On a 429 or `anthropic-ratelimit-unified-5h-status: rejected` it marks that org limited until `5h-reset` and **resends the same request** with the next org's token. An org whose token is rejected (401: expired or revoked) is skipped the same way for 10 minutes.
 5. Claude Code only ever sees the successful response — the org switched mid-session. SSE streaming is piped through untouched. When Claude Code cancels or exits mid-response, the upstream request is cancelled too; an upstream that sends nothing for 10 minutes is given up and the next org tried.
 
 One log line per request (`via <org> model=<model> -> <status>`) goes to a temp file printed at launch (`-> proxy 127.0.0.1:<port> (order: ..., strategy: ..., log: ...)`). The prompt and the tokens are never logged.
@@ -97,39 +101,48 @@ One log line per request (`via <org> model=<model> -> <status>`) goes to a temp 
 [ -n "$CLAUDE_ORG_STATE_FILE" ] && [ -f "$CLAUDE_ORG_STATE_FILE" ] && node -p "require(process.env.CLAUDE_ORG_STATE_FILE).org"
 ```
 
+**claude.ai connectors (Slack / Notion / …)**
+
+Claude Code loads claude.ai connector MCPs (Gmail / Drive / Calendar / Notion / Slack …, `mcp__claude_ai_*`) only while it uses a claude.ai login: when `ANTHROPIC_AUTH_TOKEN` or an API key takes precedence it skips them (its debug log says `[claudeai-mcp] Disabled: API-key auth precedence active`; `ANTHROPIC_BASE_URL` alone does not disable them). So when you are signed in to claude.ai, `claude-org proxy` leaves the login in place and passes its secret in a header instead, and connectors work in proxy sessions:
+
+- Connectors are those of your **claude.ai login** (the default org), whichever org the proxy sends model requests to. Their calls go from Claude Code straight to Anthropic, not through the proxy.
+- The launch asks `claude auth status` first (about one second). If you are not signed in, have an API key or token in your env, or the check fails, the session starts the earlier way (Bearer secret, no connectors) and the launch line says why.
+- `CLAUDE_ORG_NO_CONNECTORS=1` forces the earlier way. The session gets `CLAUDE_ORG_CONNECTORS=1` or `0` so hooks can tell which one it is.
+- Claude Code may also send custom headers to other Anthropic endpoints. The secret is accepted only by this session's loopback proxy and is worthless once it exits.
+
 **Limitations of proxy mode**
 
-- claude.ai connector MCPs (Gmail / Drive / Calendar / Notion / Slack …) and Remote Control are **unavailable**: `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat the session as external-token auth, so `mcp__claude_ai_*` tools do not appear. Local/plugin MCPs work. Open connectors in a plain `claude --resume` session — history is shared.
+- Without a claude.ai login (see above), claude.ai connector MCPs and Remote Control are **unavailable**. Local/plugin MCPs work either way. Open connectors in a plain `claude --resume` session — history is shared.
 - Each proxy serves one session and dies when `claude` exits.
 
 **Subagents**
 
 - Subagents started with Claude Code's Agent tool run in the same process as the parent session and share its `ANTHROPIC_BASE_URL`, so they go through the same proxy with no setup and use the same orgs' limits. Their requests appear in the proxy log with their own `model=` (e.g. a Haiku subagent).
 - Not covered: a `claude` started as a separate process (it needs its own `claude-org proxy`), and agents that run in the cloud (e.g. `isolation: remote`).
-- The connector MCP limitation above applies to subagents too.
+- Subagents get the same connector MCPs as the parent session (none when it started without a claude.ai login).
 - When an org's 5h or 7d window is rejected, the org is taken out for every model, so subagents also move to the next org until the window resets. A 429 for one model only (#8) moves that model only; other models, including those of subagents, stay on the org.
 - Work routed to a Team / Enterprise org (e.g. your company's) counts toward that org's usage, which its admins can see.
 
 ### Prompt cache & tool search
 
-A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` makes Claude Code treat the session as API-key auth, which changes two defaults:
+A custom `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (the mode without a claude.ai login) makes Claude Code treat the session as API-key auth, which changes two defaults:
 
 - **Prompt cache TTL drops to 5 minutes** (subscription-direct sessions get 1 hour). The 1-hour TTL is requested via the `anthropic-beta` header, which the proxy forwards unchanged.
 - **MCP tool search** (deferred tool-definition loading) is **disabled**.
 
-`claude-org proxy` restores the subscription-equivalent behavior by launching `claude` with `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` and `ENABLE_TOOL_SEARCH=true`. If you have set either variable yourself, your value wins.
+`claude-org proxy` restores the subscription-equivalent behavior by launching `claude` with `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` and `ENABLE_TOOL_SEARCH=true` (in both modes). If you have set either variable yourself, your value wins.
 
 | Entry point | Mid-session switch | Connector MCPs | Best for |
 |---|---|---|---|
 | `claude` | no (default org) | yes | connector work |
 | `claude-org auto --resume` | at launch only | no on preferred org / yes on default | short tasks |
-| `claude-org proxy --resume` | **automatic** | no | long-running work, agents, unattended runs |
+| `claude-org proxy --resume` | **automatic** | yes with a claude.ai login (those of the login) / no otherwise | long-running work, agents, unattended runs |
 
 ### Unattended use (supervisors, `--dangerously-skip-permissions`)
 
 When a supervisor starts `claude` without a person watching (e.g. `claude -p` with `--dangerously-skip-permissions`), launch it through `claude-org proxy`, not `claude-org <org>` / `auto`:
 
-- **Use proxy mode only.** `claude-org <org>` and `auto` put the org token into `claude`'s environment as `CLAUDE_CODE_OAUTH_TOKEN`, where a prompt-injected `claude` can read it. In proxy mode the tokens stay in the launcher process; `claude` only holds the per-session proxy secret, which is worth nothing outside that session.
+- **Use proxy mode only.** `claude-org <org>` and `auto` put the org token into `claude`'s environment as `CLAUDE_CODE_OAUTH_TOKEN`, where a prompt-injected `claude` can read it. In proxy mode the org tokens stay in the launcher process; `claude` only holds the per-session proxy secret, which is worth nothing outside that session (and, when you are signed in to claude.ai, its own claude.ai login, which it has without claude-org too; set `CLAUDE_ORG_NO_CONNECTORS=1` if the unattended session should not use the login).
 - **Signals.** The launcher forwards `SIGTERM` / `SIGHUP` (and `SIGINT` when it has no terminal) to `claude`, waits for it to exit, and reports its exit code (`128+signal` when killed); after 10 s it sends `SIGKILL`. So a supervisor that kills the launcher pid does not leave an orphaned `claude`, and the proxy lives exactly as long as `claude` does. With a terminal, Ctrl-C goes to `claude` only (the launcher stays until `claude` exits).
 - **Keep the token files away from `claude`'s shell.** A `claude` running with permissions skipped can `cat ~/.claude/org-tokens/*.token` from Bash. The proxy refuses token files that are not mode `0600` and owned by you, but that does not stop your own `claude`. Deny the directory to sandboxed commands and to the Read tool in the settings of the project the unattended session runs in (both are needed: the sandbox covers shell commands only, the Read tool follows permission rules):
 
@@ -169,8 +182,10 @@ When a supervisor starts `claude` without a person watching (e.g. `claude -p` wi
 | `CLAUDE_ORG_WATCH_MAX_SLEEP` | `18000` | Max seconds between `watch` re-checks (values < 60 also lower the 60s minimum — for tests) |
 | `CLAUDE_ORG_UPSTREAM` | `https://api.anthropic.com` | API base URL for `probe` and `proxy` (stub upstream in tests). `proxy` refuses any other value unless `CLAUDE_ORG_UNSAFE_UPSTREAM=1`, since org tokens are sent there |
 | `CLAUDE_ORG_UNSAFE_UPSTREAM` | (unset) | `1` lets `proxy` forward to a `CLAUDE_ORG_UPSTREAM` other than `api.anthropic.com` (tests only) |
-| `CLAUDE_ORG_PROXY_SECRET` | (unset) | Standalone `node lib/proxy.js` only: the bearer value clients must send. `claude-org proxy` generates one per session itself |
-| `CLAUDE_ORG_PROXY` | `1` when launched via `proxy` | Marker env passed to the claude process so user hooks can detect connector-less sessions |
+| `CLAUDE_ORG_PROXY_SECRET` | (unset) | Standalone `node lib/proxy.js` only: the value clients must send (as `x-claude-org-secret` header or bearer token). `claude-org proxy` generates one per session itself |
+| `CLAUDE_ORG_NO_CONNECTORS` | (unset) | `1`: `proxy` always passes the secret as `ANTHROPIC_AUTH_TOKEN` (no claude.ai login check, no connector MCPs) |
+| `CLAUDE_ORG_PROXY` | `1` when launched via `proxy` | Marker env passed to the claude process so user hooks can detect proxy sessions |
+| `CLAUDE_ORG_CONNECTORS` | `1` / `0` when launched via `proxy` | Marker env: `1` when the session kept its claude.ai login (connector MCPs can load), `0` otherwise |
 | `CLAUDE_ORG_STATE_FILE` | set when launched via `proxy` | Path of the JSON file holding the org and model of the last request (read it from a statusline or hook) |
 | `CLAUDE_ORG_FORCE_PROBE` | (unset) | Test seam: `allowed` / `rejected[:<epoch>]` / `rejected_until:<epoch>` fakes `probe` results without API calls |
 | `CLAUDE_ORG_REJECT_FILE` | (unset) | Test seam: orgs listed comma-separated in this file are treated as rate-limited by `proxy` |
