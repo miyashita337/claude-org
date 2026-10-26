@@ -38,7 +38,14 @@ test.before(async () => {
       const tok = (req.headers.authorization || '').replace(/^Bearer /, '');
       hits[tok] = (hits[tok] || 0) + 1;
       let model = '';
-      try { model = JSON.parse(Buffer.concat(chunks).toString()).model; } catch { /* no model */ }
+      let parsed = {};
+      try { parsed = JSON.parse(Buffer.concat(chunks).toString()); model = parsed.model; } catch { /* no model */ }
+      // Claude Code's startup quota check: the real API refuses it like this
+      // for every OAuth token (#35)
+      if (parsed.max_tokens === 1 && parsed.messages?.[0]?.content === 'quota') {
+        res.writeHead(429, { 'content-type': 'application/json' });
+        return res.end('{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}');
+      }
       if (tok === 'tok-401') {
         res.writeHead(401, { 'content-type': 'application/json' });
         return res.end('{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}');
@@ -228,6 +235,31 @@ test('H2c: wrong x-claude-org-secret -> 401 even with the right Bearer', async t
   const r = await rawRequest(p.port, { headers: { authorization: 'Bearer CLAUDE-AI-LOGIN-TOKEN' } });
   assert.strictEqual(r.status, 401, 'login token alone must not pass');
   assert.strictEqual(await upstreamHits(), before, 'a request with a wrong secret reached the upstream');
+});
+
+// #35: the startup quota check gets 429 from every org (real API behavior), so
+// its 429 must not fail over, quarantine the model, or raise an ALERT
+test('H2d: quota check 429 is passed through without failover, quarantine or ALERT', async t => {
+  const p = await startProxy(t, { order: ['a', 'b'] });
+  const quota = JSON.stringify({ model: 'qm', max_tokens: 1, messages: [{ role: 'user', content: 'quota' }] });
+  const before = (await upstreamState()).hits;
+  const r = await post(p.port, '/v1/messages?beta=true', {}, quota);
+  assert.strictEqual(r.status, 429);
+  assert.strictEqual(r.headers.get('x-claude-org'), 'a');
+  const after = (await upstreamState()).hits;
+  assert.strictEqual((after['tok-a'] || 0) - (before['tok-a'] || 0), 1, 'quota check not sent once to a');
+  assert.strictEqual(after['tok-b'] || 0, before['tok-b'] || 0, 'quota check failed over to b');
+  assert.ok(p.logs.some(l => /quota check via a -> 429 \(passed through/.test(l)), p.logs.join(''));
+  assert.ok(!p.logs.some(l => /ALERT|rejected model|rate-limited/.test(l)), p.logs.join(''));
+  // the model is not quarantined: a real request on it still goes to a
+  const r2 = await post(p.port, '/v1/messages?beta=true', {}, bodyFor('qm'));
+  assert.strictEqual(r2.status, 200);
+  assert.strictEqual(r2.headers.get('x-claude-org'), 'a');
+  // a near-miss (a system prompt, as real requests have) is a normal model request
+  const notQuota = JSON.stringify({ model: 'qm', max_tokens: 1, system: 'x', messages: [{ role: 'user', content: 'quota' }] });
+  const r3 = await post(p.port, '/v1/messages', {}, notQuota);
+  assert.ok(p.logs.some(l => /via a model=qm -> /.test(l)), p.logs.join(''));
+  await r3.arrayBuffer();
 });
 
 // M3: Host must name this proxy (DNS rebinding), only GET/POST/DELETE under
