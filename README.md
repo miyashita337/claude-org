@@ -201,7 +201,7 @@ When a supervisor starts `claude` without a person watching (e.g. `claude -p` wi
 ## Notes
 
 - **Token safety**: tokens are read from files only and never printed to logs, errors, or test snapshots. A token file must be mode `0600` and owned by you (`chmod 600 ~/.claude/org-tokens/*.token`); one that other users can read is refused. Org names are limited to letters, digits, `_` and `-`. The proxy binds to `127.0.0.1` only and serves only the `claude` it launched (see [Unattended use](#unattended-use-supervisors---dangerously-skip-permissions)).
-- **probe cost**: each `probe` sends one `max_tokens=1` request (~11 tokens billed to that org), once per `auto` launch.
+- **probe cost**: each `probe` sends one `max_tokens=1` request (~23 tokens billed to that org, Claude Code's one-line system prompt included so OAuth-gated models such as Opus are served), once per `auto` launch.
 - **Token expiry**: tokens last ~1 year. If `probe` returns `status=unknown` or `status` shows `(auth status failed)`, rerun `claude setup-token` and overwrite the file.
 
 ## A note on terms

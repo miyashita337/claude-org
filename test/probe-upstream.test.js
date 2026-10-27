@@ -146,6 +146,40 @@ test('a header-less refusal on a 5h-rejected org is not blamed on the model', as
   }
 });
 
+// Issue #40: with an OAuth token the real API refused Opus with a header-less
+// 429 rate_limit_error when the request had no system prompt, and served it with
+// Claude Code's (2026-10-26). The stub refuses the same way unless that system
+// prompt is sent.
+test('probe sends the Claude Code system prompt so OAuth-gated models are served', async () => {
+  const systems = [];
+  const server = await startUpstream((req, res) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      const system = JSON.parse(Buffer.concat(chunks).toString()).system;
+      systems.push(system);
+      if (system !== "You are Claude Code, Anthropic's official CLI for Claude.") {
+        res.writeHead(429, { 'content-type': 'application/json' });
+        return res.end('{"type":"error","error":{"type":"rate_limit_error","message":"Error"}}');
+      }
+      res.writeHead(200, { 'anthropic-ratelimit-unified-5h-status': 'allowed', 'anthropic-ratelimit-unified-5h-utilization': '0.1' });
+      res.end('{}');
+    });
+  });
+  try {
+    const dir = makeTokenDir({ team: 'dummy-token-team' });
+    const r = await runBinAsync(['probe', 'team', '--model', 'claude-opus-5-5'], {
+      CLAUDE_ORG_TOKEN_DIR: dir,
+      CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${server.address().port}`,
+    });
+    assert.strictEqual(systems.length, 1, JSON.stringify(systems));
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^status=allowed .* model=claude-opus-5-5 model_status=available$/m);
+  } finally {
+    server.close();
+  }
+});
+
 test('CLAUDE_ORG_PROBE_MODEL sets the probe model', async () => {
   const r = await probeWith(['probe', 'team'], { CLAUDE_ORG_PROBE_MODEL: 'gated' });
   assert.deepStrictEqual(r.seen, ['gated']);
