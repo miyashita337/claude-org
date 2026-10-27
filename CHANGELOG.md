@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `probe` / `status` / `auto` with a model (`--model`, `CLAUDE_ORG_PROBE_MODEL`): Opus is no longer reported `model_status=unavailable` on orgs that serve it. With an OAuth token the API refused Opus with a header-less 429 when the request had no system prompt; the probe request now sends Claude Code's system prompt (#40)
+
 ## 0.5.1 — 2026-10-27
 
 - docs: Claude in Chrome (`--chrome`, browser automation) also works in proxy sessions that kept the claude.ai login, since 0.5.0: Claude Code gates it on the same auth check as connector MCPs. README now says so, notes that it drives the extension of the claude.ai login while model requests go to the proxy's org, and that it is off with `CLAUDE_ORG_NO_CONNECTORS=1` (#41)
