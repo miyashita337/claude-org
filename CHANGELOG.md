@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.2 — 2026-10-28
+
 - `probe` / `status` / `auto` with a model (`--model`, `CLAUDE_ORG_PROBE_MODEL`): Opus is no longer reported `model_status=unavailable` on orgs that serve it. With an OAuth token the API refused Opus with a header-less 429 when the request had no system prompt; the probe request now sends Claude Code's system prompt (#40)
 
 ## 0.5.1 — 2026-10-27
