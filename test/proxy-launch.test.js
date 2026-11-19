@@ -576,12 +576,25 @@ test('repeated launches stay bounded and each launch keeps its log and pid file'
   };
   try {
     const logs = [];
+    let last;
     for (let i = 0; i < 23; i++) {
-      const r = await runBinAsync(['proxy'], env);
-      logs.push(r.stderr.match(/log: (.+)\)$/m)[1]);
+      last = await runBinAsync(['proxy'], env);
+      logs.push(last.stderr.match(/log: (.+)\)$/m)[1]);
     }
     const runDirs = fs.readdirSync(tmpRoot).filter(n => /^claude-org-proxy-/.test(n));
-    assert.strictEqual(runDirs.length, 21, '20 kept at the last start + the last run');
+    // Issue #44: pruning keeps, on purpose, a dir whose recorded pid looks
+    // alive (the dead launcher's pid can be reused by another process, which
+    // Windows does quickly) and a dir it cannot remove (reported, retried at
+    // the next launch). Those are extra to the 20 + 1 bound, so they are
+    // subtracted here instead of making the exact count flaky.
+    const pidAlive = n => {
+      const pid = Number(fs.readFileSync(path.join(tmpRoot, n, 'pid'), 'utf8').trim());
+      try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+    };
+    const aliveNow = runDirs.filter(pidAlive);
+    const notRemoved = last.stderr.match(/cannot remove old proxy log dir/g) || [];
+    assert.strictEqual(runDirs.length - aliveNow.length - notRemoved.length, 21,
+      `20 kept at the last start + the last run (dirs=${runDirs.length} alive=${aliveNow.join(',')} notRemoved=${notRemoved.length})`);
     assert.ok(fs.existsSync(logs[logs.length - 1]), 'latest log path exists');
     assert.ok(!fs.existsSync(logs[0]), 'oldest was pruned');
   } finally {
