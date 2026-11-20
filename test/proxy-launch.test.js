@@ -319,6 +319,9 @@ async function startSleepingProxy(t, upstream) {
     CLAUDE_ORG_TOKEN_DIR: makeTokenDir(TOKEN_SET),
     CLAUDE_ORG_UPSTREAM: `http://127.0.0.1:${upstream.address().port}`,
     CLAUDE_ORG_UNSAFE_UPSTREAM: '1',
+    // The sleeping stub never answers `claude auth status`, so the login check
+    // would wait its 15 s timeout before launching; signal tests skip it.
+    CLAUDE_ORG_NO_CONNECTORS: '1',
   });
   t.after(() => { try { run.child.kill('SIGKILL'); } catch { /* exited */ } });
   const deadline = Date.now() + 10000;
