@@ -7,7 +7,7 @@ const assert = require('node:assert');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
-const { tmpdir, makeTokenDir, makeClaudeStub, runBinAsync } = require('./helpers');
+const { tmpdir, makeTokenDir, makeClaudeStub, runBinAsync, spawnBin } = require('./helpers');
 
 function stubUpstream() {
   return new Promise(resolve => {
@@ -561,6 +561,15 @@ test('pruneRunDirs reports a dir it cannot remove', () => {
   assert.match(errs[0], /cannot remove old proxy log dir .*stuck1.*EACCES/);
 });
 
+async function waitPidGone(pid, timeoutMs = 5000) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    try { process.kill(pid, 0); } catch (e) { if (e.code === 'ESRCH') return; throw e; }
+    if (Date.now() > until) throw new Error(`launcher pid ${pid} still alive after ${timeoutMs}ms`);
+    await new Promise(r => setTimeout(r, 20));
+  }
+}
+
 test('repeated launches stay bounded and each launch keeps its log and pid file', async () => {
   const upstream = await stubUpstream();
   const stub = makeClaudeStub(path.join(tmpdir(), 'bin'));
@@ -576,25 +585,19 @@ test('repeated launches stay bounded and each launch keeps its log and pid file'
   };
   try {
     const logs = [];
-    let last;
     for (let i = 0; i < 23; i++) {
-      last = await runBinAsync(['proxy'], env);
-      logs.push(last.stderr.match(/log: (.+)\)$/m)[1]);
+      const run = spawnBin(['proxy'], env);
+      const r = await run.result;
+      logs.push(r.stderr.match(/log: (.+)\)$/m)[1]);
+      // Issue #44: the next launch skips a dir whose launcher still answers
+      // process.kill(pid, 0). Windows CI ended with 22 dirs, none of them
+      // alive afterwards: one launcher still answered right after 'close'.
+      // Wait until it is gone, as it would be between real launches, so the
+      // count below is exact.
+      await waitPidGone(run.child.pid);
     }
     const runDirs = fs.readdirSync(tmpRoot).filter(n => /^claude-org-proxy-/.test(n));
-    // Issue #44: pruning keeps, on purpose, a dir whose recorded pid looks
-    // alive (the dead launcher's pid can be reused by another process, which
-    // Windows does quickly) and a dir it cannot remove (reported, retried at
-    // the next launch). Those are extra to the 20 + 1 bound, so they are
-    // subtracted here instead of making the exact count flaky.
-    const pidAlive = n => {
-      const pid = Number(fs.readFileSync(path.join(tmpRoot, n, 'pid'), 'utf8').trim());
-      try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
-    };
-    const aliveNow = runDirs.filter(pidAlive);
-    const notRemoved = last.stderr.match(/cannot remove old proxy log dir/g) || [];
-    assert.strictEqual(runDirs.length - aliveNow.length - notRemoved.length, 21,
-      `20 kept at the last start + the last run (dirs=${runDirs.length} alive=${aliveNow.join(',')} notRemoved=${notRemoved.length})`);
+    assert.strictEqual(runDirs.length, 21, '20 kept at the last start + the last run');
     assert.ok(fs.existsSync(logs[logs.length - 1]), 'latest log path exists');
     assert.ok(!fs.existsSync(logs[0]), 'oldest was pruned');
   } finally {
